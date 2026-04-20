@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sim Preview</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --panel-2: #1e293b;
+      --border: #1f2937;
+      --muted: #6b7280;
+      --text: #e5e7eb;
+      --accent: #60a5fa;
+      --accent-strong: #3b82f6;
+      --pink: #f472b6;
+      --green: #4ade80;
+
+      /* DevTools-inspired box-model colors */
+      --hl-content: rgba(111, 168, 220, 0.55);   /* blue */
+      --hl-content-border: rgba(111, 168, 220, 1);
+      --hl-padding: rgba(147, 196, 125, 0.55);   /* green */
+      --hl-parent: rgba(233, 30, 99, 0.25);      /* pink overlay */
+      --hl-parent-border: rgba(233, 30, 99, 0.9);
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+      font-size: 13px;
+    }
+
+    /* ---------- sidebar ---------- */
+    .sidebar {
+      width: 320px;
+      min-width: 320px;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .sidebar-header {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-header h1 {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .sidebar-header h1 .logo {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 8px var(--green);
+    }
+    .sidebar-header .sub {
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 4px;
+      font-family: 'SF Mono', Menlo, monospace;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      padding: 12px 12px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .btn {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 7px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.15s, border-color 0.15s;
+      text-align: center;
+    }
+    .btn:hover { background: #263244; }
+    .btn.active {
+      background: var(--accent-strong);
+      border-color: var(--accent);
+      color: white;
+    }
+    .btn.wide { grid-column: 1 / -1; }
+
+    .section-title {
+      padding: 10px 16px 4px;
+      font-size: 10px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .selected-detail {
+      padding: 10px 16px 12px;
+      border-bottom: 1px solid var(--border);
+      font-family: 'SF Mono', Menlo, monospace;
+      font-size: 12px;
+      min-height: 46px;
+    }
+    .selected-detail .name { color: var(--pink); }
+    .selected-detail .dim { color: var(--muted); margin-left: 6px; }
+    .selected-detail .src {
+      display: block;
+      color: var(--accent);
+      margin-top: 4px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .selected-detail .src:hover { text-decoration: underline; }
+    .selected-detail .empty { color: var(--muted); font-style: italic; font-family: inherit; }
+
+    .component-stack {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 8px 12px;
+      font-family: 'SF Mono', Menlo, monospace;
+      font-size: 12px;
+    }
+    .component-item {
+      padding: 6px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      border-left: 2px solid transparent;
+      margin-bottom: 2px;
+    }
+    .component-item:hover { background: rgba(255,255,255,0.04); }
+    .component-item.selected {
+      background: rgba(96, 165, 250, 0.12);
+      border-left-color: var(--accent);
+    }
+    .component-item .name { color: #93c5fd; }
+    .component-item .source { color: var(--muted); font-size: 10px; margin-top: 2px; }
+    .component-item .dim { color: var(--muted); font-size: 10px; margin-left: 6px; }
+
+    .stack-empty {
+      padding: 16px;
+      color: var(--muted);
+      font-style: italic;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    /* ---------- preview stage ---------- */
+    .preview-container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      background:
+        radial-gradient(ellipse at center, #13203a 0%, #050913 70%);
+    }
+
+    .device-frame {
+      position: relative;
+      border-radius: 44px;
+      overflow: hidden;
+      box-shadow:
+        0 30px 60px rgba(0,0,0,0.5),
+        0 0 0 2px #1f2937,
+        0 0 0 4px #0a0f1c;
+    }
+    #sim-stream {
+      display: block;
+      max-height: 92vh;
+      max-width: calc(100vw - 340px);
+      object-fit: contain;
+      cursor: crosshair;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+
+    .inspector-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    .hl {
+      position: absolute;
+      box-sizing: border-box;
+      pointer-events: none;
+      transition: left 0.08s linear, top 0.08s linear, width 0.08s linear, height 0.08s linear;
+    }
+    .hl.primary {
+      background: var(--hl-content);
+      border: 1px solid var(--hl-content-border);
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0);
+    }
+    .hl.pinned {
+      border: 1px dashed var(--hl-content-border);
+      background: rgba(111, 168, 220, 0.25);
+    }
+    .hl.parent {
+      background: var(--hl-parent);
+      border: 1px dashed var(--hl-parent-border);
+    }
+
+    .hl-label {
+      position: absolute;
+      top: -22px;
+      left: 0;
+      background: var(--hl-content-border);
+      color: #0b1220;
+      font-family: 'SF Mono', Menlo, monospace;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 3px;
+      white-space: nowrap;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .hl-label .dim { color: rgba(0,0,0,0.55); font-weight: 500; }
+    .hl-label.below { top: auto; bottom: -22px; }
+
+    .status-bar {
+      position: absolute;
+      bottom: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--border);
+      padding: 5px 14px;
+      border-radius: 999px;
+      font-size: 11px;
+      color: var(--muted);
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      font-family: 'SF Mono', Menlo, monospace;
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    .status-dot.disconnected { background: #ef4444; }
+
+    .touch-indicator {
+      position: absolute;
+      width: 26px; height: 26px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.7);
+      pointer-events: none;
+      transform: translate(-50%, -50%);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .touch-indicator.active { opacity: 1; transition: opacity 0.05s; }
+
+    #loading {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center; color: var(--muted);
+    }
+    .spinner {
+      width: 34px; height: 34px;
+      border: 3px solid #1f2937;
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+      margin: 0 auto 10px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .kbd {
+      display: inline-block;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      font-family: 'SF Mono', Menlo, monospace;
+      font-size: 10px;
+      color: var(--text);
+    }
+  </style>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h1><span class="logo"></span> Sim Preview</h1>
+      <div class="sub" id="device-sub">connecting…</div>
+    </div>
+
+    <div class="controls">
+      <button class="btn wide" id="btn-inspect" onclick="toggleInspector()">
+        🔍 Inspect <span class="kbd" style="margin-left:6px">I</span>
+      </button>
+      <button class="btn" onclick="sendButton('Home')">⌂ Home</button>
+      <button class="btn" onclick="sendButton('Back')">← Back</button>
+      <button class="btn wide" onclick="captureScreenshot()">📷 Screenshot</button>
+    </div>
+
+    <div class="section-title">Selected</div>
+    <div class="selected-detail" id="selected-detail">
+      <div class="empty">Turn on Inspect, then hover the stream.</div>
+    </div>
+
+    <div class="section-title">Component stack</div>
+    <div class="component-stack" id="component-stack">
+      <div class="stack-empty">
+        Press <span class="kbd">I</span> or click Inspect.
+        Hover the stream to preview, click to pin, <span class="kbd">Esc</span> to clear.
+        <br><br>Cmd-click a source to open it in your editor.
+      </div>
+    </div>
+  </aside>
+
+  <main class="preview-container">
+    <div id="loading">
+      <div class="spinner"></div>
+      <div>Connecting to simulator…</div>
+    </div>
+
+    <div class="device-frame" id="device-frame" style="display:none">
+      <img id="sim-stream" alt="Simulator" />
+      <div class="inspector-overlay" id="inspector-overlay">
+        <div class="hl parent" id="hl-parent" style="display:none"></div>
+        <div class="hl primary" id="hl-primary" style="display:none">
+          <div class="hl-label" id="hl-label"></div>
+        </div>
+      </div>
+      <div class="touch-indicator" id="touch-indicator"></div>
+    </div>
+
+    <div class="status-bar">
+      <div class="status-dot" id="status-dot"></div>
+      <span id="status-text">connecting…</span>
+    </div>
+  </main>
+
+  <script>
+    // ---------- state ----------
+    let config = null;
+    let ws = null;
+    let inspectorMode = false;
+
+    let lastHoverInspect = 0;
+    const HOVER_THROTTLE_MS = 90;
+
+    let pendingInspectId = 0;   // monotonically increasing
+    let lastReceivedId = 0;
+    let pinned = false;         // true after click-to-pin
+    let latestFrame = null;     // {x,y,width,height}
+    let latestStack = [];       // [{componentName, source, frame?}]
+    let selectedStackIdx = 0;
+
+    // ---------- init ----------
+    async function init() {
+      try {
+        const res = await fetch('/api/config');
+        config = await res.json();
+        document.getElementById('device-sub').textContent =
+          `${config.simulator.name} · ${config.simulator.udid.slice(0, 8)}…`;
+
+        const img = document.getElementById('sim-stream');
+        img.src = config.streamUrl;
+        img.onload = () => {
+          document.getElementById('loading').style.display = 'none';
+          document.getElementById('device-frame').style.display = 'inline-block';
+          document.getElementById('status-dot').className = 'status-dot';
+          document.getElementById('status-text').textContent =
+            `${img.naturalWidth}×${img.naturalHeight}`;
+        };
+        img.onerror = () => {
+          if (document.getElementById('device-frame').style.display === 'none') {
+            document.getElementById('status-dot').className = 'status-dot disconnected';
+            document.getElementById('status-text').textContent = 'stream error';
+          }
+        };
+
+        connectWebSocket();
+        setupPointerEvents();
+        setupKeyboard();
+      } catch (e) {
+        document.getElementById('status-text').textContent = 'error: ' + e.message;
+        document.getElementById('status-dot').className = 'status-dot disconnected';
+      }
+    }
+
+    function connectWebSocket() {
+      ws = new WebSocket(`ws://${location.host}`);
+      ws.onopen = () => console.log('[ws] connected');
+      ws.onclose = () => {
+        console.log('[ws] disconnected, retrying…');
+        setTimeout(connectWebSocket, 1500);
+      };
+      ws.onmessage = (e) => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+        if (msg.type === 'inspectResult') handleInspectResult(msg);
+      };
+    }
+
+    // ---------- pointer / touch events ----------
+    function setupPointerEvents() {
+      const img = document.getElementById('sim-stream');
+      const frame = document.getElementById('device-frame');
+      const touchIndicator = document.getElementById('touch-indicator');
+      let isDown = false;
+
+      const rel = (e) => {
+        const r = img.getBoundingClientRect();
+        return {
+          x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
+          y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)),
+        };
+      };
+
+      frame.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        isDown = true;
+        const { x, y } = rel(e);
+
+        if (inspectorMode) {
+          // click to pin
+          pinned = true;
+          requestInspect(x, y);
+          document.getElementById('hl-primary').classList.add('pinned');
+        } else {
+          sendTouch('Down', x, y);
+        }
+
+        const fRect = frame.getBoundingClientRect();
+        touchIndicator.style.left = (e.clientX - fRect.left) + 'px';
+        touchIndicator.style.top = (e.clientY - fRect.top) + 'px';
+        touchIndicator.className = 'touch-indicator active';
+      });
+
+      frame.addEventListener('mousemove', (e) => {
+        const { x, y } = rel(e);
+
+        if (inspectorMode) {
+          if (pinned) return;
+          const now = performance.now();
+          if (now - lastHoverInspect >= HOVER_THROTTLE_MS) {
+            lastHoverInspect = now;
+            requestInspect(x, y);
+          }
+          return;
+        }
+
+        if (!isDown) return;
+        sendTouch('Move', x, y);
+        const fRect = frame.getBoundingClientRect();
+        touchIndicator.style.left = (e.clientX - fRect.left) + 'px';
+        touchIndicator.style.top = (e.clientY - fRect.top) + 'px';
+      });
+
+      frame.addEventListener('mouseup', (e) => {
+        if (!isDown) return;
+        isDown = false;
+        if (!inspectorMode) {
+          const { x, y } = rel(e);
+          sendTouch('Up', x, y);
+        }
+        touchIndicator.className = 'touch-indicator';
+      });
+
+      frame.addEventListener('mouseleave', (e) => {
+        if (isDown && !inspectorMode) {
+          isDown = false;
+          const { x, y } = rel(e);
+          sendTouch('Up', x, y);
+        }
+        touchIndicator.className = 'touch-indicator';
+        if (inspectorMode && !pinned) clearHighlight();
+      });
+    }
+
+    function setupKeyboard() {
+      window.addEventListener('keydown', (e) => {
+        const typing =
+          /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '') ||
+          document.activeElement?.isContentEditable;
+        if (typing) return;
+
+        if (e.key === 'i' || e.key === 'I') {
+          toggleInspector();
+          e.preventDefault();
+        } else if (e.key === 'Escape') {
+          pinned = false;
+          clearHighlight();
+        }
+      });
+    }
+
+    // ---------- network ----------
+    function sendTouch(action, x, y) {
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'touch', action, x: x.toFixed(4), y: y.toFixed(4) }));
+      }
+    }
+    function sendButton(button) {
+      if (!ws || ws.readyState !== 1) return;
+      ws.send(JSON.stringify({ type: 'button', button, direction: 'Down' }));
+      setTimeout(() => ws.send(JSON.stringify({ type: 'button', button, direction: 'Up' })), 100);
+    }
+    function requestInspect(x, y) {
+      if (!ws || ws.readyState !== 1) return;
+      pendingInspectId++;
+      ws.send(JSON.stringify({ type: 'inspect', x, y, requestStack: true, reqId: pendingInspectId }));
+    }
+
+    // ---------- inspect result ----------
+    function handleInspectResult(msg) {
+      // Guard against stale hover responses
+      const id = msg.reqId ?? pendingInspectId;
+      if (id < lastReceivedId) return;
+      lastReceivedId = id;
+
+      if (msg.error) {
+        setStatus(`inspector: ${msg.error}`);
+        return;
+      }
+
+      latestFrame = msg.frame || null;
+      latestStack = msg.stack || [];
+      selectedStackIdx = 0;
+      renderHighlight();
+      renderStack();
+      renderSelectedDetail();
+    }
+
+    function renderHighlight() {
+      const primary = document.getElementById('hl-primary');
+      const parent = document.getElementById('hl-parent');
+      const label = document.getElementById('hl-label');
+
+      primary.classList.toggle('pinned', pinned);
+
+      // primary frame: use the currently selected stack item's frame if available,
+      // else fall back to latestFrame (top-level hit frame).
+      const sel = latestStack[selectedStackIdx];
+      const f = sel?.frame || latestFrame;
+      if (!f) { primary.style.display = 'none'; parent.style.display = 'none'; return; }
+
+      primary.style.display = 'block';
+      primary.style.left = (f.x * 100) + '%';
+      primary.style.top = (f.y * 100) + '%';
+      primary.style.width = (f.width * 100) + '%';
+      primary.style.height = (f.height * 100) + '%';
+
+      // Label: <Name> W×H · file:line
+      const img = document.getElementById('sim-stream');
+      const pxW = Math.round(f.width * img.naturalWidth / 3);   // rough logical px for @3x devices
+      const pxH = Math.round(f.height * img.naturalHeight / 3);
+      const name = sel?.componentName || '?';
+      const src = sel?.source
+        ? `${sel.source.fileName.split('/').pop()}:${(sel.source.line0Based ?? 0) + 1}`
+        : '';
+      label.innerHTML = `
+        <span>&lt;${escapeHtml(name)}&gt;</span>
+        <span class="dim">${pxW}×${pxH}</span>
+        ${src ? `<span class="dim">· ${escapeHtml(src)}</span>` : ''}
+      `;
+
+      // Flip label below if near the top edge
+      label.classList.toggle('below', f.y < 0.04);
+
+      // Parent outline: next-outer stack entry with a frame
+      const parentItem = latestStack.slice(selectedStackIdx + 1).find((s) => s.frame);
+      if (parentItem?.frame) {
+        const p = parentItem.frame;
+        parent.style.display = 'block';
+        parent.style.left = (p.x * 100) + '%';
+        parent.style.top = (p.y * 100) + '%';
+        parent.style.width = (p.width * 100) + '%';
+        parent.style.height = (p.height * 100) + '%';
+      } else {
+        parent.style.display = 'none';
+      }
+    }
+
+    function renderStack() {
+      const el = document.getElementById('component-stack');
+      if (!latestStack.length) {
+        el.innerHTML = `<div class="stack-empty">No component data returned.</div>`;
+        return;
+      }
+      el.innerHTML = latestStack.map((item, i) => {
+        const file = item.source?.fileName?.split('/').pop() || '?';
+        const line = (item.source?.line0Based ?? 0) + 1;
+        return `
+          <div class="component-item ${i === selectedStackIdx ? 'selected' : ''}"
+               data-idx="${i}"
+               onmouseenter="hoverStack(${i})"
+               onclick="selectStack(${i}, event)"
+               title="${escapeAttr(item.source?.fileName || '')}:${line}">
+            <div class="name">&lt;${escapeHtml(item.componentName || 'Unknown')} /&gt;</div>
+            <div class="source">${escapeHtml(file)}:${line}</div>
+          </div>`;
+      }).join('');
+    }
+
+    function renderSelectedDetail() {
+      const el = document.getElementById('selected-detail');
+      const sel = latestStack[selectedStackIdx];
+      if (!sel) {
+        el.innerHTML = `<div class="empty">Turn on Inspect, then hover the stream.</div>`;
+        return;
+      }
+      const img = document.getElementById('sim-stream');
+      const f = sel.frame || latestFrame;
+      const pxW = f ? Math.round(f.width * img.naturalWidth / 3) : null;
+      const pxH = f ? Math.round(f.height * img.naturalHeight / 3) : null;
+      const source = sel.source;
+      const rel = source?.fileName ? shortPath(source.fileName) : '';
+      const line = (source?.line0Based ?? 0) + 1;
+      const col = (source?.column0Based ?? 0) + 1;
+
+      el.innerHTML = `
+        <div>
+          <span class="name">&lt;${escapeHtml(sel.componentName || 'Unknown')} /&gt;</span>
+          ${pxW != null ? `<span class="dim">${pxW}×${pxH}</span>` : ''}
+        </div>
+        ${source ? `
+          <a class="src" onclick="openInEditor(${escapeAttr(JSON.stringify(source))})">
+            ${escapeHtml(rel)}:${line}:${col}
+          </a>` : `<div class="dim">no source info</div>`}
+      `;
+    }
+
+    function hoverStack(i) {
+      if (i === selectedStackIdx) return;
+      selectedStackIdx = i;
+      renderHighlight();
+      renderSelectedDetail();
+      document.querySelectorAll('.component-item').forEach((el, k) => {
+        el.classList.toggle('selected', k === i);
+      });
+    }
+
+    function selectStack(i, e) {
+      selectedStackIdx = i;
+      pinned = true;
+      renderHighlight();
+      renderSelectedDetail();
+      document.querySelectorAll('.component-item').forEach((el, k) => {
+        el.classList.toggle('selected', k === i);
+      });
+      // cmd/ctrl-click opens in editor
+      if (e && (e.metaKey || e.ctrlKey)) {
+        const sel = latestStack[i];
+        if (sel?.source) openInEditor(sel.source);
+      }
+    }
+
+    function openInEditor(source) {
+      if (!source?.fileName) return;
+      const line = (source.line0Based ?? 0) + 1;
+      const col = (source.column0Based ?? 0) + 1;
+      // vscode:// handler — works for VS Code, Cursor, Windsurf, etc.
+      const url = `vscode://file${source.fileName}:${line}:${col}`;
+      window.location.href = url;
+    }
+
+    function clearHighlight() {
+      document.getElementById('hl-primary').style.display = 'none';
+      document.getElementById('hl-parent').style.display = 'none';
+      document.getElementById('selected-detail').innerHTML =
+        `<div class="empty">Turn on Inspect, then hover the stream.</div>`;
+      document.getElementById('component-stack').innerHTML =
+        `<div class="stack-empty">Hover the stream to inspect.</div>`;
+      latestFrame = null;
+      latestStack = [];
+    }
+
+    function toggleInspector() {
+      inspectorMode = !inspectorMode;
+      document.getElementById('btn-inspect').classList.toggle('active', inspectorMode);
+      document.getElementById('sim-stream').style.cursor = inspectorMode ? 'crosshair' : 'default';
+      if (!inspectorMode) { pinned = false; clearHighlight(); }
+    }
+
+    function captureScreenshot() {
+      if (config) window.open(config.snapshotUrl, '_blank');
+    }
+
+    function setStatus(text) {
+      document.getElementById('status-text').textContent = text;
+    }
+
+    // ---------- helpers ----------
+    function shortPath(full) {
+      // Show the last 3 segments for readability
+      const parts = full.split('/');
+      if (parts.length <= 3) return full;
+      return '…/' + parts.slice(-3).join('/');
+    }
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+    }
+    function escapeAttr(s) { return escapeHtml(s).replaceAll('`', '&#96;'); }
+
+    init();
+  </script>
+</body>
+</html>

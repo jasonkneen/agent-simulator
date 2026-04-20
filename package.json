@@ -1,0 +1,58 @@
+{
+  "name": "agent-simulator",
+  "version": "0.3.0",
+  "description": "Live iOS Simulator preview with React Native inspector, accessibility-tree driven tools, and an MCP bridge. Drive iOS apps from a browser or an AI agent.",
+  "main": "server.js",
+  "files": [
+    "runtime",
+    "server.js",
+    "mcp",
+    "scripts",
+    "web",
+    "web-app/dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js --dev",
+    "build": "cd web-app && bun run build",
+    "demo": "node scripts/demo.mjs",
+    "mcp": "node mcp/server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "ws": "^8.16.0",
+    "zod": "^3.23.8"
+  },
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "ios",
+    "simulator",
+    "preview",
+    "mjpeg",
+    "react-native",
+    "expo",
+    "inspector",
+    "accessibility",
+    "mcp",
+    "agents",
+    "ai",
+    "axe",
+    "drive"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jkneen/agent-simulator"
+  },
+  "homepage": "https://github.com/jkneen/agent-simulator",
+  "bugs": {
+    "url": "https://github.com/jkneen/agent-simulator/issues"
+  }
+}
