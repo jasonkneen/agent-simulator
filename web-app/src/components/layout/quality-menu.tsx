@@ -50,9 +50,9 @@ const PRESET_ORDER = ["eco", "balanced", "smooth", "max", "fluid"] as const;
 const PRESET_DESCRIPTION: Record<keyof typeof QUALITY_PRESETS, string> = {
   eco:      "2 fps  \u00b7 300\u00d7650  \u00b7 battery-friendly",
   balanced: "3 fps  \u00b7 400\u00d7870  \u00b7 default",
-  smooth:   "10 fps \u00b7 400\u00d7870 \u00b7 good for scrolling",
-  max:      "30 fps \u00b7 400\u00d7870 \u00b7 maximum MJPEG path",
-  fluid:    "up to 60 fps \u00b7 BGRA push-stream \u00b7 stalls on idle screens",
+  smooth:   "up to 10 fps \u00b7 400\u00d7870 \u00b7 good for scrolling",
+  max:      "up to 30 fps \u00b7 400\u00d7870 \u00b7 max MJPEG (axe caps actual ~10)",
+  fluid:    "BGRA push + 3 fps keepalive \u00b7 experimental",
 };
 
 function sameSettings(a: CaptureSettings, b: CaptureSettings) {
@@ -181,7 +181,9 @@ export function QualityMenu({
         <div className="px-2 pb-2 pt-1 text-[10px] leading-snug text-muted-foreground">
           Click accuracy is independent of stream size — taps carry [0, 1] ratios.
           <br />
-          FPS &gt; 30 auto-switches to the BGRA push-stream, which only emits frames while the sim is rendering.
+          Actual FPS is capped by axe's screenshot loop (⩾300ms per frame
+          → ~3–10 fps realistic). BGRA mode tries the simulator's
+          push-stream but falls back to a 3 fps keepalive when the sim is idle.
         </div>
       </DropdownMenuContent>
     </DropdownMenu>

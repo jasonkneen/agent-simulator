@@ -132,6 +132,95 @@ async fn probe_native_size(udid: &str) -> anyhow::Result<(u32, u32)> {
     Ok((w, h))
 }
 
+/// Launch a low-rate screenshot keepalive that only publishes a frame
+/// when the BGRA stream has gone silent for longer than `idle_threshold`.
+/// This fills the "idle sim = blank preview" gap without stepping on
+/// BGRA frames during active rendering.
+fn spawn_screenshot_keepalive(
+    udid: String,
+    last_frame_at: Arc<Mutex<Instant>>,
+    frame_tx: broadcast::Sender<Arc<Vec<u8>>>,
+    latest_tx: watch::Sender<Option<Arc<Vec<u8>>>>,
+    idle_threshold: Duration,
+) {
+    tokio::spawn(async move {
+        // Tick at half the idle threshold so we detect a gap quickly.
+        let tick = (idle_threshold / 2).max(Duration::from_millis(120));
+        let mut ticker = tokio::time::interval(tick);
+        loop {
+            ticker.tick().await;
+            let idle = {
+                let last = last_frame_at.lock().unwrap();
+                last.elapsed()
+            };
+            if idle < idle_threshold {
+                continue;
+            }
+            // Idle for too long — grab a screenshot so the preview doesn't
+            // look frozen. axe screenshot gives us a PNG; the stream
+            // consumer wants JPEG, so we convert with jpeg-encoder after
+            // manually peeling pixels out of the PNG. To stay
+            // dependency-light we shell out to `axe screenshot` with a
+            // small on-disk cache.
+            match take_screenshot_jpeg(&udid).await {
+                Ok(bytes) => {
+                    let arc = Arc::new(bytes);
+                    let _ = frame_tx.send(arc.clone());
+                    let _ = latest_tx.send(Some(arc));
+                    let mut last = last_frame_at.lock().unwrap();
+                    *last = Instant::now();
+                    debug!("keepalive: emitted screenshot after {:?} idle", idle);
+                }
+                Err(e) => {
+                    debug!("keepalive: screenshot failed: {}", e);
+                }
+            }
+        }
+    });
+}
+
+/// Ask axe for a PNG screenshot, decode with the `png` crate, then
+/// re-encode as JPEG using `jpeg-encoder` so the keepalive frame uses
+/// the same wire format (image/jpeg) as the rest of the stream. Small
+/// scale is applied post-encode by just accepting whatever axe gives
+/// us at native retina — keepalive fires at most once every 1.5s so
+/// the extra bytes are negligible.
+async fn take_screenshot_jpeg(udid: &str) -> anyhow::Result<Vec<u8>> {
+    let tmp = format!("/tmp/axe-keepalive-{}.png", std::process::id());
+    let out = Command::new("axe")
+        .args(["screenshot", "--udid", udid, "--output", &tmp])
+        .output()
+        .await?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("axe screenshot failed: {}", stderr.trim());
+    }
+    let png_bytes = tokio::fs::read(&tmp).await?;
+    let _ = tokio::fs::remove_file(&tmp).await;
+
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png_bytes));
+        let mut reader = decoder.read_info()?;
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf)?;
+        // jpeg-encoder ColorType variants we might hit from axe's PNG
+        // output. Common: Rgb / Rgba / Grayscale.
+        let color = match info.color_type {
+            png::ColorType::Rgb => jpeg_encoder::ColorType::Rgb,
+            png::ColorType::Rgba => jpeg_encoder::ColorType::Rgba,
+            png::ColorType::Grayscale => jpeg_encoder::ColorType::Luma,
+            other => anyhow::bail!("unsupported PNG color type {:?}", other),
+        };
+        let mut jpeg = Vec::with_capacity(info.buffer_size() / 4);
+        let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 70);
+        encoder.encode(&buf[..info.buffer_size()], info.width as u16, info.height as u16, color)?;
+        Ok(jpeg)
+    })
+    .await?
+}
+
+use std::sync::Mutex;
+
 async fn stream_bgra(
     udid: &str,
     _fps: u32,
@@ -150,6 +239,25 @@ async fn stream_bgra(
     info!(
         "BGRA stream: native={}x{} scale={} → target={}x{} ({} bytes/frame)",
         native_w, native_h, scale, w, h, frame_bytes
+    );
+
+    // Shared "last frame arrived at" timestamp. The screenshot keepalive
+    // task reads this; the BGRA read loop updates it.
+    //
+    // Aggressive threshold (300ms = ~3fps floor) because axe's BGRA
+    // push-stream is unreliable on current iOS simulators — it often
+    // produces only the first frame and then stalls even under active
+    // rendering. With a 300ms threshold the preview keeps refreshing via
+    // screenshots whenever BGRA goes quiet; when BGRA does produce
+    // frames (animation-heavy apps, scrolling) it runs much faster and
+    // the keepalive stays silent.
+    let last_frame_at = Arc::new(Mutex::new(Instant::now()));
+    spawn_screenshot_keepalive(
+        udid.to_string(),
+        last_frame_at.clone(),
+        frame_tx.clone(),
+        latest_tx.clone(),
+        Duration::from_millis(300),
     );
 
     let mut child = Command::new("axe")
@@ -224,6 +332,11 @@ async fn stream_bgra(
         let _ = latest_tx.send(Some(arc));
         *total_frames += 1;
         window_frames += 1;
+        // Reset the keepalive clock so we don't emit a redundant
+        // screenshot right after a real BGRA frame.
+        if let Ok(mut last) = last_frame_at.lock() {
+            *last = Instant::now();
+        }
 
         if last_log.elapsed() >= Duration::from_secs(5) {
             let actual = window_frames as f64 / last_log.elapsed().as_secs_f64();
