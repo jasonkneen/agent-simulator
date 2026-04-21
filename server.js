@@ -181,7 +181,20 @@ function serveStatic(req, res) {
  * @property {'mjpeg' | 'bgra'} mode
  */
 
-/** Clamp + coerce a CaptureSettings-shaped input to safe defaults. */
+/**
+ * Clamp + coerce a CaptureSettings-shaped input to safe defaults.
+ *
+ * Mode selection rules:
+ *   - `mode: 'bgra'`  explicit BGRA push-stream (FBVideoStreamConfiguration).
+ *                    Uncapped FPS, driven by the simulator's render rate.
+ *                    Best for scrolling / animation — may stall on idle.
+ *   - `mode: 'mjpeg'` axe screenshot-polling loop. Capped at 30 fps by axe
+ *                    itself; anything above that is clamped.
+ *
+ * We auto-upgrade to BGRA whenever fps > 30 even if the caller asked
+ * for MJPEG, because axe refuses fps > 30 for the MJPEG path and would
+ * exit immediately with a validation error.
+ */
 function sanitizeSettings(input = {}) {
   const def = {
     fps: parseInt(process.env.SP_FPS || '3', 10),
@@ -189,10 +202,13 @@ function sanitizeSettings(input = {}) {
     scale: parseFloat(process.env.SP_SCALE || '0.33'),
     mode: process.env.SP_CAPTURE === 'bgra' ? 'bgra' : 'mjpeg',
   };
-  const fps = clampNum(input.fps ?? def.fps, 1, 30);
+  const rawFps = clampNum(input.fps ?? def.fps, 1, 60);
   const quality = clampNum(input.quality ?? def.quality, 10, 95);
   const scale = clampNum(input.scale ?? def.scale, 0.1, 1.0);
-  const mode = input.mode === 'bgra' ? 'bgra' : 'mjpeg';
+  let mode = input.mode === 'bgra' ? 'bgra' : (input.mode === 'mjpeg' ? 'mjpeg' : def.mode);
+  if (rawFps > 30 && mode === 'mjpeg') mode = 'bgra';
+  // When mode=mjpeg we MUST keep fps ≤ 30 so axe doesn't crash.
+  const fps = mode === 'mjpeg' ? Math.min(rawFps, 30) : rawFps;
   return { fps, quality, scale, mode };
 }
 function clampNum(v, lo, hi) {

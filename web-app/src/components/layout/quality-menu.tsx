@@ -18,37 +18,43 @@ import type { CaptureSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
- * Capture-quality presets. Tuning knobs:
+ * Capture-quality presets.
  *
- *   - fps     how often the capture loop pulls a frame
- *   - scale   retina factor applied to the output image (0.33 = one
- *             device-point per pixel, i.e. the same resolution the
- *             browser paints the preview at)
- *   - quality JPEG quality 0\u2013100
+ *   fps     how often a frame is pulled from the simulator
+ *   scale   retina factor applied to the output image (0.33 = one
+ *           device-point per pixel, i.e. the size the browser paints at)
+ *   quality JPEG quality 0-100
+ *   mode    'mjpeg' = axe screenshot-polling loop (reliable, idle-safe,
+ *           axe hard-caps at 30 fps)
+ *           'bgra'  = FBVideoStreamConfiguration push-stream off
+ *           SimDeviceIOClient. Uncapped up to the simulator's native
+ *           render rate (60 fps). Only emits frames while the sim is
+ *           actually rendering; stalls on idle screens.
  *
- * Every preset keeps clickability (coords are [0,1] ratios regardless of
- * pixel count). Lower presets just mean a blurrier / choppier preview.
+ * Every preset keeps clickability: taps travel as [0, 1] ratios and the
+ * stream resolution is purely cosmetic.
  */
 export const QUALITY_PRESETS: Record<
-  "eco" | "balanced" | "smooth" | "max",
+  "eco" | "balanced" | "smooth" | "max" | "fluid",
   CaptureSettings
 > = {
   eco:      { fps: 2,  quality: 45, scale: 0.25, mode: "mjpeg" },
   balanced: { fps: 3,  quality: 55, scale: 0.33, mode: "mjpeg" },
   smooth:   { fps: 10, quality: 65, scale: 0.33, mode: "mjpeg" },
-  max:      { fps: 15, quality: 80, scale: 0.5,  mode: "mjpeg" },
+  max:      { fps: 30, quality: 80, scale: 0.33, mode: "mjpeg" },
+  fluid:    { fps: 60, quality: 70, scale: 0.33, mode: "bgra" },
 };
 
-const PRESET_ORDER = ["eco", "balanced", "smooth", "max"] as const;
+const PRESET_ORDER = ["eco", "balanced", "smooth", "max", "fluid"] as const;
 
 const PRESET_DESCRIPTION: Record<keyof typeof QUALITY_PRESETS, string> = {
-  eco: "2 fps \u00b7 300\u00d7650 \u00b7 battery-friendly",
-  balanced: "3 fps \u00b7 400\u00d7870 \u00b7 default",
-  smooth: "10 fps \u00b7 400\u00d7870 \u00b7 good for scrolling",
-  max: "15 fps \u00b7 600\u00d71300 \u00b7 pixel-clean recordings",
+  eco:      "2 fps  \u00b7 300\u00d7650  \u00b7 battery-friendly",
+  balanced: "3 fps  \u00b7 400\u00d7870  \u00b7 default",
+  smooth:   "10 fps \u00b7 400\u00d7870 \u00b7 good for scrolling",
+  max:      "30 fps \u00b7 400\u00d7870 \u00b7 maximum MJPEG path",
+  fluid:    "up to 60 fps \u00b7 BGRA push-stream \u00b7 stalls on idle screens",
 };
 
-/** True when `a` matches `b` on every relevant field. */
 function sameSettings(a: CaptureSettings, b: CaptureSettings) {
   return (
     a.fps === b.fps &&
@@ -58,7 +64,6 @@ function sameSettings(a: CaptureSettings, b: CaptureSettings) {
   );
 }
 
-/** Pick which preset (if any) best matches a CaptureSettings. */
 export function detectPreset(s: CaptureSettings): keyof typeof QUALITY_PRESETS | "custom" {
   for (const name of PRESET_ORDER) {
     if (sameSettings(QUALITY_PRESETS[name], s)) return name;
@@ -88,17 +93,20 @@ export function QualityMenu({
             >
               <Gauge className="size-3.5" />
               {label}
-              <span className="text-muted-foreground">
-                {settings.fps}fps
-              </span>
+              <span className="text-muted-foreground">{settings.fps}fps</span>
+              {settings.mode === "bgra" && (
+                <span className="rounded-sm bg-primary/15 px-1 text-[9px] font-semibold uppercase tracking-wider text-primary">
+                  bgra
+                </span>
+              )}
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>
         <TooltipContent>
-          Stream quality \u2014 doesn\u2019t affect click accuracy.
+          Stream quality — doesn't affect click accuracy.
         </TooltipContent>
       </Tooltip>
-      <DropdownMenuContent align="end" className="w-64">
+      <DropdownMenuContent align="end" className="w-72">
         <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
           Stream quality
         </DropdownMenuLabel>
@@ -112,8 +120,13 @@ export function QualityMenu({
               onSelect={() => onChange(p)}
               className="flex flex-col items-start gap-0.5 py-1.5"
             >
-              <div className="flex w-full items-center">
+              <div className="flex w-full items-center gap-1.5">
                 <span className="flex-1 font-medium">{capitalize(name)}</span>
+                {p.mode === "bgra" && (
+                  <span className="rounded-sm bg-primary/15 px-1 text-[9px] font-semibold uppercase tracking-wider text-primary">
+                    bgra
+                  </span>
+                )}
                 <Check
                   className={cn(
                     "size-3.5 text-primary",
@@ -136,7 +149,7 @@ export function QualityMenu({
             label="FPS"
             value={settings.fps}
             min={1}
-            max={30}
+            max={60}
             step={1}
             onChange={(v) => onChange({ fps: v })}
             format={(v) => `${v}`}
@@ -159,11 +172,16 @@ export function QualityMenu({
             onChange={(v) => onChange({ scale: v })}
             format={(v) => v.toFixed(2)}
           />
+          <ModeRow
+            mode={settings.mode}
+            onChange={(m) => onChange({ mode: m })}
+          />
         </div>
         <DropdownMenuSeparator />
         <div className="px-2 pb-2 pt-1 text-[10px] leading-snug text-muted-foreground">
-          Click accuracy is independent of stream size \u2014 taps carry
-          [0, 1] ratios.
+          Click accuracy is independent of stream size — taps carry [0, 1] ratios.
+          <br />
+          FPS &gt; 30 auto-switches to the BGRA push-stream, which only emits frames while the sim is rendering.
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -209,6 +227,46 @@ function SliderRow({
         )}
       />
     </label>
+  );
+}
+
+function ModeRow({
+  mode,
+  onChange,
+}: {
+  mode: CaptureSettings["mode"];
+  onChange: (m: CaptureSettings["mode"]) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+      <span>Mode</span>
+      <div className="ml-auto flex overflow-hidden rounded-md border border-border/70 bg-background/70 text-[10px]">
+        <button
+          type="button"
+          onClick={() => onChange("mjpeg")}
+          className={cn(
+            "px-2 py-1 transition",
+            mode === "mjpeg"
+              ? "bg-primary/15 text-foreground"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          MJPEG
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange("bgra")}
+          className={cn(
+            "border-l border-border/70 px-2 py-1 transition",
+            mode === "bgra"
+              ? "bg-primary/15 text-foreground"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          BGRA
+        </button>
+      </div>
+    </div>
   );
 }
 

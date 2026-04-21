@@ -250,9 +250,13 @@ async fn stream_mjpeg(
     latest_tx: &watch::Sender<Option<Arc<Vec<u8>>>>,
     total_frames: &mut u64,
 ) -> anyhow::Result<()> {
+    // axe stream-video --format raw refuses fps > 30 (hard validation in
+    // the tool). If the caller asked for higher, silently clamp — higher
+    // rates require the BGRA path.
+    let axe_fps = fps.min(30);
     info!(
-        "MJPEG stream: fps={} quality={} scale={}",
-        fps, quality, scale
+        "MJPEG stream: fps={} (requested={}) quality={} scale={}",
+        axe_fps, fps, quality, scale
     );
     let mut child = Command::new("axe")
         .args([
@@ -260,7 +264,7 @@ async fn stream_mjpeg(
             "--format",
             "raw",
             "--fps",
-            &fps.to_string(),
+            &axe_fps.to_string(),
             "--quality",
             &quality.to_string(),
             "--scale",
