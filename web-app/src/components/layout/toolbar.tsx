@@ -18,7 +18,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
-import type { BridgeStatus } from "@/lib/types";
+import { QualityMenu } from "@/components/layout/quality-menu";
+import type { BridgeStatus, CaptureSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export type ToolbarProps = {
@@ -41,6 +42,8 @@ export type ToolbarProps = {
   onMultitask: () => void;
   onLock: () => void;
   onRotate: () => void;
+  capture?: CaptureSettings;
+  onCaptureChange?: (next: Partial<CaptureSettings>) => void;
 };
 
 export function Toolbar(props: ToolbarProps) {
@@ -59,6 +62,8 @@ export function Toolbar(props: ToolbarProps) {
     onMultitask,
     onLock,
     onRotate,
+    capture,
+    onCaptureChange,
   } = props;
 
   return (
@@ -129,6 +134,14 @@ export function Toolbar(props: ToolbarProps) {
       </div>
 
       <Separator orientation="vertical" className="mx-1 h-6" />
+
+      {/* Quality */}
+      {capture && onCaptureChange && (
+        <>
+          <QualityMenu settings={capture} onChange={onCaptureChange} />
+          <Separator orientation="vertical" className="mx-1 h-6" />
+        </>
+      )}
 
       {/* Panel toggles */}
       <div className="flex items-center gap-0.5">

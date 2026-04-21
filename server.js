@@ -35,6 +35,7 @@ async function findBootedSimulator() {
 // remains in web/ and is served under /classic for anyone who needs it.
 const WEB_APP_DIR = path.join(__dirname, 'web-app', 'dist');
 const LEGACY_DIR = path.join(__dirname, 'web');
+
 /**
  * Files we never show to the user — these are React's own createElement /
  * jsxDEV / reconciler plumbing. Everything else (including node_modules/
@@ -43,23 +44,9 @@ const LEGACY_DIR = path.join(__dirname, 'web');
 const UNHELPFUL_SOURCE_RE =
   /\/node_modules\/(react|scheduler|react-dom|react-reconciler)\/(cjs|umd|esm)\/|\/react-jsx-(dev-)?runtime/;
 
-/**
- * If an inspectResult has bundle frames (React 19 / RN 0.81 bridge),
- * batch-call Metro's /symbolicate endpoint to translate them into real
- * source-file paths, then write those back onto each stack item's
- * `source` field. For each stack item we symbolicate up to 3 candidate
- * frames (the JSX runtime helper + parents) and pick the first one
- * that isn't inside a React / RN internal file.
- *
- * Metro's endpoint:
- *    POST http://localhost:8081/symbolicate
- *    { stack: [{file,lineNumber,column,methodName}, ...] }
- *    → { stack: [{file,lineNumber,column,methodName}, ...] }   (same order)
- */
 async function symbolicateInspectResult(msg) {
   const stack = Array.isArray(msg.stack) ? msg.stack : [];
   const flat = [];
-  /** Map { stackIdx, frameIdx } so we can put results back in place. */
   const slots = [];
   for (let i = 0; i < stack.length; i++) {
     const frames = stack[i] && stack[i].bundleFrames;
@@ -93,7 +80,6 @@ async function symbolicateInspectResult(msg) {
     return msg;
   }
 
-  // Collect the symbolicated frames back into per-stack-item arrays.
   const perItem = stack.map(() => []);
   for (let j = 0; j < slots.length; j++) {
     const { stackIdx } = slots[j];
@@ -104,12 +90,9 @@ async function symbolicateInspectResult(msg) {
 
   const newStack = stack.slice();
   for (let i = 0; i < newStack.length; i++) {
-    if (newStack[i] && newStack[i].source) continue; // already had a source
+    if (newStack[i] && newStack[i].source) continue;
     const candidates = perItem[i];
     if (!candidates || candidates.length === 0) continue;
-    // Pick the first frame that isn't React's own JSX/reconciler plumbing.
-    // RN component sources (node_modules/react-native/Libraries/…) are
-    // valid — the user can read them.
     const pick = candidates.find((c) => !UNHELPFUL_SOURCE_RE.test(c.file));
     if (!pick) continue;
     newStack[i] = {
@@ -163,7 +146,6 @@ function serveFile(res, filePath) {
 }
 
 function serveStatic(req, res) {
-  // Legacy single-file UI at /classic.
   if (req.url === '/classic' || req.url.startsWith('/classic/')) {
     const rel = req.url === '/classic' ? '/index.html' : req.url.slice('/classic'.length);
     return serveFile(res, path.join(LEGACY_DIR, rel));
@@ -171,13 +153,10 @@ function serveStatic(req, res) {
 
   const useApp = fs.existsSync(path.join(WEB_APP_DIR, 'index.html'));
   if (!useApp) {
-    // Built app missing — fall back to legacy UI and suggest building.
     const rel = req.url === '/' ? '/index.html' : req.url;
     return serveFile(res, path.join(LEGACY_DIR, rel));
   }
 
-  // Try to serve the requested file from the built app directory. Any URL
-  // that doesn't resolve to a file falls through to index.html (SPA).
   const direct = req.url === '/' ? '/index.html' : req.url.split('?')[0];
   const candidate = path.join(WEB_APP_DIR, direct);
   fs.stat(candidate, (err, stat) => {
@@ -186,40 +165,104 @@ function serveStatic(req, res) {
   });
 }
 
-async function main() {
-  console.log('🔍 Finding booted simulator...');
-  const sim = await findBootedSimulator();
-  console.log(`📱 Found: ${sim.name} (${sim.udid})`);
+// ----------------------------------------------------------------------------
+// Capture process management. sim-server is spawned with --fps / --quality
+// and SP_SCALE / SP_CAPTURE env vars. Every time the UI asks for a new
+// quality preset we kill this child and spawn a fresh one with the new
+// values; the stream URL stays accessible under a fresh randomly-bound
+// port that we broadcast to connected UI clients.
+// ----------------------------------------------------------------------------
 
-  // Start sim-server. Defaults tuned for low CPU / bandwidth; override with
-  // SP_FPS / SP_QUALITY env vars for heavier previews.
-  const fps = String(parseInt(process.env.SP_FPS || '3', 10));
-  const quality = String(parseInt(process.env.SP_QUALITY || '55', 10));
-  console.log(`🚀 Starting sim-server (fps=${fps}, q=${quality})...`);
-  const simServer = spawn(SIM_SERVER, [
-    '--id', sim.udid,
-    '--fps', fps,
-    '--quality', quality,
-    '--port', '0'
-  ], {
-    stdio: ['pipe', 'pipe', 'pipe']
-  });
+/**
+ * @typedef {Object} CaptureSettings
+ * @property {number} fps       2..30
+ * @property {number} quality   10..95
+ * @property {number} scale     0.1..1.0
+ * @property {'mjpeg' | 'bgra'} mode
+ */
 
-  let streamUrl = null;
-  
-  // Parse sim-server output for the stream URL
-  const streamReady = new Promise((resolve) => {
-    simServer.stdout.on('data', (data) => {
+/** Clamp + coerce a CaptureSettings-shaped input to safe defaults. */
+function sanitizeSettings(input = {}) {
+  const def = {
+    fps: parseInt(process.env.SP_FPS || '3', 10),
+    quality: parseInt(process.env.SP_QUALITY || '55', 10),
+    scale: parseFloat(process.env.SP_SCALE || '0.33'),
+    mode: process.env.SP_CAPTURE === 'bgra' ? 'bgra' : 'mjpeg',
+  };
+  const fps = clampNum(input.fps ?? def.fps, 1, 30);
+  const quality = clampNum(input.quality ?? def.quality, 10, 95);
+  const scale = clampNum(input.scale ?? def.scale, 0.1, 1.0);
+  const mode = input.mode === 'bgra' ? 'bgra' : 'mjpeg';
+  return { fps, quality, scale, mode };
+}
+function clampNum(v, lo, hi) {
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
+}
+
+/** Current subprocess state, mutated on every respawn. */
+const capture = {
+  settings: sanitizeSettings(),
+  proc: null,
+  streamUrl: null,
+  pending: null, // Promise<string> while a spawn is in flight
+};
+
+function broadcastToUi(payload) { /* wired up after wss exists */ }
+
+function spawnCapture(sim, settings) {
+  capture.settings = settings;
+  if (capture.proc) {
+    try { capture.proc.kill('SIGTERM'); } catch { /* ignore */ }
+    capture.proc = null;
+    capture.streamUrl = null;
+  }
+
+  console.log(
+    `🚀 sim-server (fps=${settings.fps} q=${settings.quality} scale=${settings.scale} mode=${settings.mode})…`,
+  );
+  const env = {
+    ...process.env,
+    SP_SCALE: String(settings.scale),
+    SP_CAPTURE: settings.mode,
+  };
+  const proc = spawn(
+    SIM_SERVER,
+    [
+      '--id', sim.udid,
+      '--fps', String(settings.fps),
+      '--quality', String(settings.quality),
+      '--port', '0',
+    ],
+    { stdio: ['pipe', 'pipe', 'pipe'], env },
+  );
+  capture.proc = proc;
+
+  const ready = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('sim-server timeout')), 15000);
+    proc.stdout.on('data', (data) => {
       const line = data.toString().trim();
       if (line.startsWith('stream_ready')) {
-        streamUrl = line.split(' ')[1];
-        console.log(`📺 Stream ready: ${streamUrl}`);
-        resolve(streamUrl);
+        clearTimeout(timer);
+        capture.streamUrl = line.split(' ')[1];
+        console.log(`📺 Stream ready: ${capture.streamUrl}`);
+        resolve(capture.streamUrl);
+      }
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (capture.proc === proc) {
+        // Only treat as a failure if we weren't intentionally restarting.
+        console.warn(`sim-server exited unexpectedly (code=${code})`);
+        capture.proc = null;
+        capture.streamUrl = null;
+        reject(new Error(`sim-server exited code=${code}`));
       }
     });
   });
-  
-  simServer.stderr.on('data', (data) => {
+
+  proc.stderr.on('data', (data) => {
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
       if (line.includes('ERROR') || line.includes('WARN')) {
@@ -228,37 +271,39 @@ async function main() {
     }
   });
 
-  simServer.on('close', (code) => {
-    console.log(`sim-server exited with code ${code}`);
-    process.exit(1);
-  });
+  capture.pending = ready;
+  return ready;
+}
 
-  // Wait for stream to be ready
-  await Promise.race([
-    streamReady,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('sim-server timeout')), 15000))
-  ]);
+async function main() {
+  console.log('🔍 Finding booted simulator...');
+  const sim = await findBootedSimulator();
+  console.log(`📱 Found: ${sim.name} (${sim.udid})`);
 
-  // Create HTTP server
+  await spawnCapture(sim, capture.settings);
+
+  // HTTP server
   const server = http.createServer((req, res) => {
-    // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
-    
+
     if (req.url === '/api/config') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        streamUrl,
-        snapshotUrl: streamUrl.replace('/stream.mjpeg', '/snapshot.jpg'),
-        simulator: { udid: sim.udid, name: sim.name }
+        streamUrl: capture.streamUrl,
+        snapshotUrl: capture.streamUrl?.replace('/stream.mjpeg', '/snapshot.jpg'),
+        simulator: { udid: sim.udid, name: sim.name },
+        capture: capture.settings,
       }));
       return;
     }
 
-    // Proxy /api/tree → sim-server so the browser can fetch the current
-    // accessibility hierarchy (from `axe describe-ui`) without running into
-    // cross-origin issues against the randomly-bound sim-server port.
     if (req.url === '/api/tree') {
-      const treeUrl = streamUrl.replace('/stream.mjpeg', '/api/tree');
+      if (!capture.streamUrl) {
+        res.writeHead(503, { 'Content-Type': 'text/plain' });
+        res.end('stream restarting');
+        return;
+      }
+      const treeUrl = capture.streamUrl.replace('/stream.mjpeg', '/api/tree');
       http.get(treeUrl, (upstream) => {
         res.writeHead(upstream.statusCode || 502, {
           'Content-Type': upstream.headers['content-type'] || 'application/json',
@@ -272,11 +317,6 @@ async function main() {
       return;
     }
 
-    // /api/source?file=ABS&line=N&context=M
-    // Read a window of lines around `line` from `file` and return it as
-    // JSON so the Properties panel can show the actual source for the
-    // selected React component. We only accept absolute paths that already
-    // exist — no directory escape tricks, no reads outside the FS.
     if (req.url.startsWith('/api/source?')) {
       const q = new URL(req.url, 'http://x').searchParams;
       const file = q.get('file') || '';
@@ -313,28 +353,19 @@ async function main() {
     serveStatic(req, res);
   });
 
-  // WebSocket server for touch/inspect communication
-  //
-  // Two kinds of clients connect to this WS:
-  //   - UI clients (browser) — they send touch/button/inspect, receive inspectResult
-  //   - Bridge client (the RN inspector-bridge running inside the app) — it
-  //     announces itself with {type:'bridge-ready'} and then sends back
-  //     {type:'inspectResult', frame, stack} in response to inspect requests.
-  //
-  // The bridge identifies itself via its first message; everything else is a UI client.
+  // WebSocket
   const wss = new WebSocketServer({ server });
   let bridgeWs = null;
   const uiClients = new Set();
 
-  function broadcastToUi(payload) {
+  broadcastToUi = (payload) => {
     const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
     for (const client of uiClients) {
       if (client.readyState === 1) client.send(data);
     }
-  }
+  };
 
   wss.on('connection', (ws, req) => {
-    // Until we see a bridge-ready message we assume this is a UI client.
     let isBridge = false;
     uiClients.add(ws);
     const ua = req.headers['user-agent'] || '?';
@@ -366,8 +397,6 @@ async function main() {
           break;
         }
         case 'inspectResult': {
-          // From the RN bridge — symbolicate any bundle frames into real
-          // source paths, then forward to all UI clients.
           console.log(`🔎 inspectResult: ${msg.stack?.length || 0} frames, top=${msg.stack?.[0]?.componentName || '?'}`);
           symbolicateInspectResult(msg)
             .then((enriched) => broadcastToUi(enriched))
@@ -378,42 +407,75 @@ async function main() {
           break;
         }
         case 'touch': {
+          if (!capture.proc) break;
           const { action, x, y } = msg;
-          simServer.stdin.write(`touch ${action} ${x},${y}\n`);
+          capture.proc.stdin.write(`touch ${action} ${x},${y}\n`);
           break;
         }
         case 'swipe': {
+          if (!capture.proc) break;
           const { x1, y1, x2, y2, duration } = msg;
           const dur = typeof duration === 'number' ? ` ${duration}` : '';
-          simServer.stdin.write(`swipe ${x1},${y1} ${x2},${y2}${dur}\n`);
+          capture.proc.stdin.write(`swipe ${x1},${y1} ${x2},${y2}${dur}\n`);
           break;
         }
         case 'key': {
+          if (!capture.proc) break;
           const { keyCode, direction } = msg;
-          simServer.stdin.write(`key ${direction || 'Down'} ${keyCode}\n`);
+          capture.proc.stdin.write(`key ${direction || 'Down'} ${keyCode}\n`);
           break;
         }
         case 'button': {
+          if (!capture.proc) break;
           const { button, direction } = msg;
-          simServer.stdin.write(`button ${direction || 'Down'} ${button}\n`);
+          capture.proc.stdin.write(`button ${direction || 'Down'} ${button}\n`);
           break;
         }
         case 'multitask': {
-          simServer.stdin.write(`multitask\n`);
+          if (!capture.proc) break;
+          capture.proc.stdin.write(`multitask\n`);
           break;
         }
         case 'type': {
+          if (!capture.proc) break;
           const text = typeof msg.text === 'string' ? msg.text : '';
           if (text) {
-            // Strip newlines — they are sent as separate `key 40` (Return)
-            // messages on the client side.
             const clean = text.replace(/[\r\n]/g, '');
-            if (clean) simServer.stdin.write(`type ${clean}\n`);
+            if (clean) capture.proc.stdin.write(`type ${clean}\n`);
           }
           break;
         }
+        // --------------------------------------------------------------
+        // Capture-quality controls. Browser sends { type: 'setCapture',
+        // fps, quality, scale, mode } with any subset of those fields; we
+        // merge with current settings, respawn sim-server, and broadcast
+        // the new /api/config payload so every connected UI client
+        // reconnects its MJPEG <img>.
+        // --------------------------------------------------------------
+        case 'setCapture': {
+          const next = sanitizeSettings({ ...capture.settings, ...msg });
+          (async () => {
+            try {
+              await spawnCapture(sim, next);
+              broadcastToUi({
+                type: 'configChanged',
+                config: {
+                  streamUrl: capture.streamUrl,
+                  snapshotUrl: capture.streamUrl.replace('/stream.mjpeg', '/snapshot.jpg'),
+                  simulator: { udid: sim.udid, name: sim.name },
+                  capture: capture.settings,
+                },
+              });
+            } catch (err) {
+              console.error('setCapture failed:', err.message);
+              try {
+                ws.send(JSON.stringify({ type: 'configChanged', error: err.message }));
+              } catch {}
+            }
+          })();
+          break;
+        }
         case 'inspect': {
-          // From a UI client — forward to the RN bridge
           console.log(`🔍 Inspect request at (${msg.x}, ${msg.y})`);
           if (!bridgeWs || bridgeWs.readyState !== 1) {
             ws.send(JSON.stringify({
@@ -445,7 +507,6 @@ async function main() {
       }
     });
 
-    // When a UI client joins, tell it the current bridge status.
     if (!isBridge) {
       ws.send(JSON.stringify({
         type: 'bridgeStatus',
@@ -457,21 +518,18 @@ async function main() {
   server.listen(PORT, () => {
     console.log(`\n✅ agent-simulator running at http://localhost:${PORT}`);
     console.log(`   Simulator: ${sim.name}`);
-    console.log(`   Stream: ${streamUrl}\n`);
+    console.log(`   Stream:    ${capture.streamUrl}\n`);
   });
 
   // Cleanup on exit
-  process.on('SIGINT', () => {
+  const shutdown = () => {
     console.log('\nShutting down...');
-    simServer.kill();
+    if (capture.proc) try { capture.proc.kill('SIGTERM'); } catch {}
     server.close();
     process.exit(0);
-  });
-  process.on('SIGTERM', () => {
-    simServer.kill();
-    server.close();
-    process.exit(0);
-  });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 main().catch(err => {

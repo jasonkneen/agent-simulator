@@ -29,10 +29,24 @@ export type InspectResult = {
   error?: string;
 };
 
+/**
+ * Capture pipeline settings. The UI can change them at runtime via
+ * `setCapture` WS messages; the server respawns sim-server with the new
+ * values and broadcasts a `configChanged` event so every preview
+ * reconnects its MJPEG <img>.
+ */
+export type CaptureSettings = {
+  fps: number;
+  quality: number;
+  scale: number;
+  mode: "mjpeg" | "bgra";
+};
+
 export type SimConfig = {
   streamUrl: string;
   snapshotUrl: string;
   simulator: { udid: string; name: string };
+  capture: CaptureSettings;
 };
 
 export type BridgeStatus = "disconnected" | "connecting" | "connected";

@@ -59,10 +59,21 @@ pub async fn run_capture_loop(
     let mode = CaptureMode::from_env();
     info!("capture mode = {:?}", mode);
 
-    // scale 1.0 is native retina (huge); 0.5 halves each axis.
+    // Default scale 0.33 = native retina / 3 = **one device-point per pixel**.
+    //
+    // That's the resolution the browser actually displays the sim at (our
+    // preview element is ~400×870 CSS px, the iPhone 17 Pro is 402×874 pt).
+    // Encoding anything bigger just wastes bytes: the browser downsamples
+    // it before painting, and click / touch coordinates are carried as
+    // [0, 1] ratios — they don't care about pixel count at all.
+    //
+    // Override with `SP_SCALE` for high-DPI recordings:
+    //   0.33 = 1 pt ↔ 1 px   (default, ~0.35 MP/frame on iPhone 17 Pro)
+    //   0.50 = 1.5× retina   (0.79 MP/frame)
+    //   1.00 = native retina (3.16 MP/frame)
     let scale: f32 = match std::env::var("SP_SCALE").ok().and_then(|s| s.parse().ok()) {
         Some(s) if (0.1..=1.0).contains(&s) => s,
-        _ => 0.5,
+        _ => 0.33,
     };
 
     let mut backoff = Duration::from_millis(500);

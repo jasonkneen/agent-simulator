@@ -14,6 +14,7 @@ import { useSimSocket, useSubscribe } from "@/hooks/use-sim-socket";
 import { useAxTree } from "@/hooks/use-ax-tree";
 import type {
   BridgeStatus,
+  CaptureSettings,
   InspectResult,
   LayerNode,
   Rect,
@@ -34,7 +35,7 @@ const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.ho
 type TreeSource = "ax" | "react";
 
 export default function App() {
-  const { config } = useSimConfig();
+  const { config, setConfig } = useSimConfig();
   const { socket, open: wsOpen } = useSimSocket(WS_URL);
 
   // iOS accessibility tree, fetched from /api/tree on boot. Populated
@@ -82,6 +83,10 @@ export default function App() {
         setBridgeStatus(msg.status === "connected" ? "connected" : "disconnected");
         return;
       }
+      if (msg.type === "configChanged") {
+        if (msg.config) setConfig(msg.config);
+        return;
+      }
       if (msg.type === "inspectResult") {
         setBridgeStatus("connected");
         // Drop stale responses so the hover overlay doesn't jitter backwards.
@@ -97,7 +102,7 @@ export default function App() {
           setSelectedId(idForLeaf(msg, 0));
         }
       }
-    }, []),
+    }, [setConfig]),
   );
 
   // Simple bridge liveness: we infer disconnected if the WS is closed.
@@ -330,6 +335,19 @@ export default function App() {
     window.open(url, "_self");
   }, []);
 
+  /**
+   * Push a new capture-quality setting to the server. The server respawns
+   * sim-server with the new fps / quality / scale and broadcasts a
+   * `configChanged` message which updates the stream URL; the <img>
+   * element will pick up the new src automatically.
+   */
+  const handleCaptureChange = useCallback(
+    (next: Partial<CaptureSettings>) => {
+      socketRef.current?.send({ type: "setCapture", ...next });
+    },
+    [],
+  );
+
   const toggleOpen = useCallback((id: string, open: boolean) => {
     setOpenIds((prev) => {
       const next = new Set(prev);
@@ -357,6 +375,8 @@ export default function App() {
           onMultitask={handleMultitask}
           onLock={handleLock}
           onRotate={handleRotate}
+          capture={config?.capture}
+          onCaptureChange={handleCaptureChange}
         />
 
         <div className="flex min-h-0 flex-1">

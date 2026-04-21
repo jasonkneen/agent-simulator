@@ -1,4 +1,4 @@
-import type { InspectResult } from "./types";
+import type { InspectResult, SimConfig } from "./types";
 
 export type ClientMsg =
   | { type: "touch"; action: "down" | "up" | "move" | "tap"; x: number; y: number }
@@ -15,11 +15,19 @@ export type ClientMsg =
   | { type: "multitask" }
   | { type: "key"; keyCode: string; direction?: "Down" | "Up" }
   | { type: "type"; text: string }
+  | {
+      type: "setCapture";
+      fps?: number;
+      quality?: number;
+      scale?: number;
+      mode?: "mjpeg" | "bgra";
+    }
   | { type: "inspect"; x: number; y: number; requestStack?: boolean; reqId?: string };
 
 export type ServerMsg =
   | InspectResult
-  | { type: "bridgeStatus"; status: "connected" | "disconnected" };
+  | { type: "bridgeStatus"; status: "connected" | "disconnected" }
+  | { type: "configChanged"; config: SimConfig; error?: string };
 
 type Listener = (msg: ServerMsg) => void;
 
