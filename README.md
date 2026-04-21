@@ -271,6 +271,76 @@ This means *every* user component, RN internal component (RCTView, ScrollView, �
 
 ---
 
+## Stream quality and the FPS ceiling
+
+Click the **Quality** dropdown in the toolbar. Five presets plus fine-tune
+sliders for FPS, JPEG quality, scale, and capture mode.
+
+| Preset | Target FPS | Resolution | Mode | Notes |
+|---|---|---|---|---|
+| **Eco** | 2 | 300×650 | MJPEG | battery-friendly, background monitoring |
+| **Balanced** | 3 | 400×870 | MJPEG | default — matches the CSS size the browser paints |
+| **Smooth** | up to 10 | 400×870 | MJPEG | good for scrolling |
+| **Max** | up to 30 | 400×870 | MJPEG | upper limit of the MJPEG path |
+| **Fluid** | up to 60 | 400×870 | BGRA + keepalive | experimental, see caveats below |
+
+Changing a preset fires a WebSocket `setCapture`, which makes the server
+respawn `sim-server` with the new arguments and broadcast a
+`configChanged` event. The browser `<img>` re-subscribes to the new
+stream URL automatically. Total switch time is about half a second.
+
+### Click accuracy is decoupled from resolution
+
+Every tap / swipe carries `[0, 1]` ratios. They get converted to
+device points server-side using the root `AXFrame` from
+`axe describe-ui`, so a 300×650 Eco stream has exactly the same click
+precision as a 1206×2622 native-retina stream. Lower resolutions only
+cost you pixels on screen, not targeting.
+
+### Honest FPS numbers
+
+Measured on an iPhone 17 Pro simulator on an M-series Mac:
+
+| Path | Requested | Actual |
+|---|---|---|
+| `axe screenshot` (one-shot) | — | 280–370 ms per call — **~3 fps ceiling** |
+| `axe stream-video --format raw --fps 30` | 30 | ~5–10 fps (axe's screenshot loop is the bottleneck) |
+| `axe stream-video --format bgra` | 60 | First frame, then stalls — `FBVideoStreamConfiguration` is hard-coded to `framesPerSecond: nil`, IOSurface callback stays silent on current iOS sims |
+
+So the "up to 60 fps" on the Fluid preset is aspirational: the
+architecture is in place, but **axe as shipped cannot deliver 60 fps today**. To unblock real 60 fps you'd need one of:
+
+1. Fork [axe](https://github.com/cameroncooke/AXe) and pass a concrete `framesPerSecond` value into `FBVideoStreamConfiguration` on the BGRA path.
+2. Replace the `axe stream-video` subprocess with a Swift helper that links `FBSimulatorControl.xcframework` directly and drives `SimDevice` / `SimDeviceIOClient` ourselves.
+
+Both are real half-day projects. The current wire protocol is already
+a drop-in replacement — swapping in a faster backend is one file.
+
+### Keepalive in Fluid mode
+
+Because BGRA otherwise delivers a single frame and then nothing,
+sim-server runs a **screenshot keepalive** alongside the BGRA reader
+in that mode. If no frame arrives for 300 ms, it fires one
+`axe screenshot`, decodes the PNG, re-encodes as JPEG, and broadcasts
+it — so the preview is never blank. When BGRA does fire (animation-heavy
+apps, scrolling), the keepalive stays silent.
+
+Net effect in practice:
+
+- Idle screen → ~3 fps from keepalive.
+- Active scrolling → keepalive silent, BGRA may or may not contribute.
+- Worst case is never 0 fps.
+
+### Env-var overrides
+
+The server accepts the same knobs as environment variables so you can
+pick defaults without the UI:
+
+```bash
+SP_FPS=10 SP_QUALITY=60 SP_SCALE=0.33 SP_CAPTURE=mjpeg bun start
+SP_CAPTURE=bgra bun start   # force BGRA path from boot
+```
+
 ## Tips
 
 - Use **`axe`'s simulator conventions** (device points, not Mac pixels) if you're writing agent scripts directly. The UI handles the ratio ↔ point conversion.
