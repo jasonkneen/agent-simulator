@@ -26,6 +26,8 @@ import { cn } from "@/lib/utils";
  *   quality JPEG quality 0-100
  *   mode    'mjpeg' = axe screenshot-polling loop (reliable, idle-safe,
  *           axe hard-caps at 30 fps)
+ *           'simstream' = CoreSimulator IOSurface + VideoToolbox H.264
+ *           as fMP4 over WebSocket (Komand-style native streaming)
  *           'bgra'  = FBVideoStreamConfiguration push-stream off
  *           SimDeviceIOClient. Uncapped up to the simulator's native
  *           render rate (60 fps). Only emits frames while the sim is
@@ -42,7 +44,7 @@ export const QUALITY_PRESETS: Record<
   balanced: { fps: 3,  quality: 55, scale: 0.33, mode: "mjpeg" },
   smooth:   { fps: 10, quality: 65, scale: 0.33, mode: "mjpeg" },
   max:      { fps: 30, quality: 80, scale: 0.33, mode: "mjpeg" },
-  fluid:    { fps: 60, quality: 70, scale: 0.33, mode: "bgra" },
+  fluid:    { fps: 60, quality: 70, scale: 0.33, mode: "simstream" },
 };
 
 const PRESET_ORDER = ["eco", "balanced", "smooth", "max", "fluid"] as const;
@@ -52,7 +54,7 @@ const PRESET_DESCRIPTION: Record<keyof typeof QUALITY_PRESETS, string> = {
   balanced: "3 fps  \u00b7 400\u00d7870  \u00b7 default",
   smooth:   "up to 10 fps \u00b7 400\u00d7870 \u00b7 good for scrolling",
   max:      "up to 30 fps \u00b7 400\u00d7870 \u00b7 max MJPEG (axe caps actual ~10)",
-  fluid:    "BGRA push + 3 fps keepalive \u00b7 experimental",
+  fluid:    "Native fMP4 · CoreSimulator IOSurface + VideoToolbox",
 };
 
 function sameSettings(a: CaptureSettings, b: CaptureSettings) {
@@ -94,9 +96,9 @@ export function QualityMenu({
               <Gauge className="size-3.5" />
               {label}
               <span className="text-muted-foreground">{settings.fps}fps</span>
-              {settings.mode === "bgra" && (
+              {settings.mode !== "mjpeg" && (
                 <span className="rounded-sm bg-primary/15 px-1 text-[9px] font-semibold uppercase tracking-wider text-primary">
-                  bgra
+                  {settings.mode === "simstream" ? "fmp4" : "bgra"}
                 </span>
               )}
             </Button>
@@ -122,9 +124,9 @@ export function QualityMenu({
             >
               <div className="flex w-full items-center gap-1.5">
                 <span className="flex-1 font-medium">{capitalize(name)}</span>
-                {p.mode === "bgra" && (
+                {p.mode !== "mjpeg" && (
                   <span className="rounded-sm bg-primary/15 px-1 text-[9px] font-semibold uppercase tracking-wider text-primary">
-                    bgra
+                    {p.mode === "simstream" ? "fmp4" : "bgra"}
                   </span>
                 )}
                 <Check
@@ -181,9 +183,9 @@ export function QualityMenu({
         <div className="px-2 pb-2 pt-1 text-[10px] leading-snug text-muted-foreground">
           Click accuracy is independent of stream size — taps carry [0, 1] ratios.
           <br />
-          Actual FPS is capped by axe's screenshot loop (⩾300ms per frame
-          → ~3–10 fps realistic). BGRA mode tries the simulator's
-          push-stream but falls back to a 3 fps keepalive when the sim is idle.
+          Actual FPS is capped by axe's screenshot loop in MJPEG. Native fMP4
+          streams the simulator IOSurface through VideoToolbox; BGRA remains
+          available as an experimental fallback.
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -266,6 +268,18 @@ function ModeRow({
           )}
         >
           BGRA
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange("simstream")}
+          className={cn(
+            "border-l border-border/70 px-2 py-1 transition",
+            mode === "simstream"
+              ? "bg-primary/15 text-foreground"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          fMP4
         </button>
       </div>
     </div>

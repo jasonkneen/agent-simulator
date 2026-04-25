@@ -2,11 +2,14 @@
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const net = require('net');
 const { spawn } = require('child_process');
 const { WebSocketServer } = require('ws');
 
 const PORT = parseInt(process.env.PORT || '3200');
 const SIM_SERVER = path.join(__dirname, 'sim-server', 'target', 'release', 'sim-server');
+const SIMSTREAM_PACKAGE_DIR = path.join(__dirname, 'sidecars', 'simstream');
+const SIMSTREAM_BIN = path.join(SIMSTREAM_PACKAGE_DIR, '.build', 'release', 'simstream');
 
 // Find booted simulator
 async function findBootedSimulator() {
@@ -178,13 +181,15 @@ function serveStatic(req, res) {
  * @property {number} fps       2..30
  * @property {number} quality   10..95
  * @property {number} scale     0.1..1.0
- * @property {'mjpeg' | 'bgra'} mode
+ * @property {'mjpeg' | 'bgra' | 'simstream'} mode
  */
 
 /**
  * Clamp + coerce a CaptureSettings-shaped input to safe defaults.
  *
  * Mode selection rules:
+ *   - `mode: 'simstream'` CoreSimulator/SimulatorKit IOSurface capture,
+ *                    VideoToolbox H.264 encode, fMP4-over-WebSocket playback.
  *   - `mode: 'bgra'`  explicit BGRA push-stream (FBVideoStreamConfiguration).
  *                    Uncapped FPS, driven by the simulator's render rate.
  *                    Best for scrolling / animation — may stall on idle.
@@ -196,16 +201,21 @@ function serveStatic(req, res) {
  * exit immediately with a validation error.
  */
 function sanitizeSettings(input = {}) {
+  const envMode = process.env.SP_CAPTURE === 'simstream'
+    ? 'simstream'
+    : (process.env.SP_CAPTURE === 'bgra' ? 'bgra' : 'mjpeg');
   const def = {
     fps: parseInt(process.env.SP_FPS || '3', 10),
     quality: parseInt(process.env.SP_QUALITY || '55', 10),
     scale: parseFloat(process.env.SP_SCALE || '0.33'),
-    mode: process.env.SP_CAPTURE === 'bgra' ? 'bgra' : 'mjpeg',
+    mode: envMode,
   };
   const rawFps = clampNum(input.fps ?? def.fps, 1, 60);
   const quality = clampNum(input.quality ?? def.quality, 10, 95);
   const scale = clampNum(input.scale ?? def.scale, 0.1, 1.0);
-  let mode = input.mode === 'bgra' ? 'bgra' : (input.mode === 'mjpeg' ? 'mjpeg' : def.mode);
+  let mode = input.mode === 'simstream'
+    ? 'simstream'
+    : (input.mode === 'bgra' ? 'bgra' : (input.mode === 'mjpeg' ? 'mjpeg' : def.mode));
   if (rawFps > 30 && mode === 'mjpeg') mode = 'bgra';
   // When mode=mjpeg we MUST keep fps ≤ 30 so axe doesn't crash.
   const fps = mode === 'mjpeg' ? Math.min(rawFps, 30) : rawFps;
@@ -220,28 +230,87 @@ function clampNum(v, lo, hi) {
 /** Current subprocess state, mutated on every respawn. */
 const capture = {
   settings: sanitizeSettings(),
-  proc: null,
+  proc: null,          // always the sim-server control process used for input/tree/snapshot
+  sidecarProc: null,   // native fMP4 WebSocket sidecar when mode=simstream
   streamUrl: null,
+  controlUrl: null,
+  streamKind: 'mjpeg',
   pending: null, // Promise<string> while a spawn is in flight
 };
 
+let simstreamBuildPromise = null;
+
 function broadcastToUi(payload) { /* wired up after wss exists */ }
 
-function spawnCapture(sim, settings) {
-  capture.settings = settings;
-  if (capture.proc) {
-    try { capture.proc.kill('SIGTERM'); } catch { /* ignore */ }
-    capture.proc = null;
-    capture.streamUrl = null;
+function killCaptureProcesses() {
+  for (const key of ['sidecarProc', 'proc']) {
+    const proc = capture[key];
+    if (proc) {
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      capture[key] = null;
+    }
   }
+  capture.streamUrl = null;
+  capture.controlUrl = null;
+  capture.streamKind = 'mjpeg';
+}
 
+function snapshotUrl() {
+  const base = capture.controlUrl || (capture.streamKind === 'mjpeg' ? capture.streamUrl : null);
+  return base?.replace('/stream.mjpeg', '/snapshot.jpg') || null;
+}
+
+function treeUrl() {
+  const base = capture.controlUrl || (capture.streamKind === 'mjpeg' ? capture.streamUrl : null);
+  return base?.replace('/stream.mjpeg', '/api/tree') || null;
+}
+
+function makeConfig(sim) {
+  return {
+    streamUrl: capture.streamUrl,
+    streamKind: capture.streamKind,
+    snapshotUrl: snapshotUrl(),
+    simulator: { udid: sim.udid, name: sim.name },
+    capture: capture.settings,
+  };
+}
+
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+function ensureSimstreamBinary() {
+  if (fs.existsSync(SIMSTREAM_BIN)) return Promise.resolve(SIMSTREAM_BIN);
+  if (simstreamBuildPromise) return simstreamBuildPromise;
+  console.log('🛠️  Building simstream sidecar…');
+  simstreamBuildPromise = new Promise((resolve, reject) => {
+    const proc = spawn('swift', ['build', '-c', 'release', '--package-path', SIMSTREAM_PACKAGE_DIR], {
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    proc.on('close', (code) => {
+      simstreamBuildPromise = null;
+      if (code === 0 && fs.existsSync(SIMSTREAM_BIN)) resolve(SIMSTREAM_BIN);
+      else reject(new Error(`simstream build failed code=${code}`));
+    });
+  });
+  return simstreamBuildPromise;
+}
+
+function spawnSimServer(sim, settings, label = 'sim-server') {
   console.log(
-    `🚀 sim-server (fps=${settings.fps} q=${settings.quality} scale=${settings.scale} mode=${settings.mode})…`,
+    `🚀 ${label} (fps=${settings.fps} q=${settings.quality} scale=${settings.scale} mode=${settings.mode})…`,
   );
   const env = {
     ...process.env,
     SP_SCALE: String(settings.scale),
-    SP_CAPTURE: settings.mode,
+    SP_CAPTURE: settings.mode === 'bgra' ? 'bgra' : 'mjpeg',
   };
   const proc = spawn(
     SIM_SERVER,
@@ -253,27 +322,35 @@ function spawnCapture(sim, settings) {
     ],
     { stdio: ['pipe', 'pipe', 'pipe'], env },
   );
-  capture.proc = proc;
 
   const ready = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('sim-server timeout')), 15000);
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`${label} timeout`));
+      }
+    }, 15000);
     proc.stdout.on('data', (data) => {
-      const line = data.toString().trim();
-      if (line.startsWith('stream_ready')) {
-        clearTimeout(timer);
-        capture.streamUrl = line.split(' ')[1];
-        console.log(`📺 Stream ready: ${capture.streamUrl}`);
-        resolve(capture.streamUrl);
+      for (const line of data.toString().trim().split('\n')) {
+        if (line.startsWith('stream_ready')) {
+          clearTimeout(timer);
+          settled = true;
+          const url = line.split(' ')[1];
+          console.log(`📺 ${label} ready: ${url}`);
+          resolve({ proc, streamUrl: url });
+        }
       }
     });
     proc.on('close', (code) => {
       clearTimeout(timer);
-      if (capture.proc === proc) {
-        // Only treat as a failure if we weren't intentionally restarting.
-        console.warn(`sim-server exited unexpectedly (code=${code})`);
+      if (!settled) {
+        settled = true;
+        reject(new Error(`${label} exited code=${code}`));
+      } else if (capture.proc === proc) {
+        console.warn(`${label} exited unexpectedly (code=${code})`);
         capture.proc = null;
-        capture.streamUrl = null;
-        reject(new Error(`sim-server exited code=${code}`));
+        capture.controlUrl = null;
       }
     });
   });
@@ -282,10 +359,87 @@ function spawnCapture(sim, settings) {
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
       if (line.includes('ERROR') || line.includes('WARN')) {
-        console.log(`  sim-server: ${line}`);
+        console.log(`  ${label}: ${line}`);
       }
     }
   });
+
+  return ready;
+}
+
+async function spawnSimstreamSidecar(sim, settings) {
+  const bin = await ensureSimstreamBinary();
+  const port = await getFreePort();
+  console.log(`🚀 simstream sidecar (fps=${settings.fps} port=${port})…`);
+  const proc = spawn(bin, [sim.udid, String(port), String(settings.fps)], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error('simstream sidecar timeout'));
+      }
+    }, 20000);
+
+    proc.stdout.on('data', (data) => {
+      for (const line of data.toString().trim().split('\n')) {
+        if (line.startsWith('stream_ready')) {
+          clearTimeout(timer);
+          settled = true;
+          const url = line.split(' ')[1];
+          console.log(`🎞️  simstream ready: ${url}`);
+          resolve({ proc, streamUrl: url });
+        }
+      }
+    });
+    proc.stderr.on('data', (data) => {
+      for (const line of data.toString().trim().split('\n')) {
+        if (line) console.log(`  simstream: ${line}`);
+      }
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (!settled) {
+        settled = true;
+        reject(new Error(`simstream sidecar exited code=${code}`));
+      } else if (capture.sidecarProc === proc) {
+        console.warn(`simstream sidecar exited unexpectedly (code=${code})`);
+        capture.sidecarProc = null;
+        capture.streamUrl = null;
+      }
+    });
+  });
+}
+
+function controlSettingsFor(settings) {
+  if (settings.mode !== 'simstream') return settings;
+  // Keep sim-server alive for stdin touch/key commands, AX tree proxying, and MCP snapshots.
+  return { ...settings, mode: 'mjpeg', fps: Math.min(3, settings.fps), quality: Math.min(settings.quality, 70) };
+}
+
+function spawnCapture(sim, settings) {
+  capture.settings = settings;
+  killCaptureProcesses();
+
+  const ready = (async () => {
+    const control = await spawnSimServer(sim, controlSettingsFor(settings), settings.mode === 'simstream' ? 'sim-server control' : 'sim-server');
+    capture.proc = control.proc;
+    capture.controlUrl = control.streamUrl;
+
+    if (settings.mode === 'simstream') {
+      const sidecar = await spawnSimstreamSidecar(sim, settings);
+      capture.sidecarProc = sidecar.proc;
+      capture.streamUrl = sidecar.streamUrl;
+      capture.streamKind = 'simstream';
+    } else {
+      capture.streamUrl = control.streamUrl;
+      capture.streamKind = 'mjpeg';
+    }
+    return capture.streamUrl;
+  })();
 
   capture.pending = ready;
   return ready;
@@ -304,23 +458,18 @@ async function main() {
 
     if (req.url === '/api/config') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        streamUrl: capture.streamUrl,
-        snapshotUrl: capture.streamUrl?.replace('/stream.mjpeg', '/snapshot.jpg'),
-        simulator: { udid: sim.udid, name: sim.name },
-        capture: capture.settings,
-      }));
+      res.end(JSON.stringify(makeConfig(sim)));
       return;
     }
 
     if (req.url === '/api/tree') {
-      if (!capture.streamUrl) {
+      const upstreamTreeUrl = treeUrl();
+      if (!upstreamTreeUrl) {
         res.writeHead(503, { 'Content-Type': 'text/plain' });
         res.end('stream restarting');
         return;
       }
-      const treeUrl = capture.streamUrl.replace('/stream.mjpeg', '/api/tree');
-      http.get(treeUrl, (upstream) => {
+      http.get(upstreamTreeUrl, (upstream) => {
         res.writeHead(upstream.statusCode || 502, {
           'Content-Type': upstream.headers['content-type'] || 'application/json',
           'Cache-Control': 'no-store',
@@ -475,12 +624,7 @@ async function main() {
               await spawnCapture(sim, next);
               broadcastToUi({
                 type: 'configChanged',
-                config: {
-                  streamUrl: capture.streamUrl,
-                  snapshotUrl: capture.streamUrl.replace('/stream.mjpeg', '/snapshot.jpg'),
-                  simulator: { udid: sim.udid, name: sim.name },
-                  capture: capture.settings,
-                },
+                config: makeConfig(sim),
               });
             } catch (err) {
               console.error('setCapture failed:', err.message);
@@ -540,7 +684,7 @@ async function main() {
   // Cleanup on exit
   const shutdown = () => {
     console.log('\nShutting down...');
-    if (capture.proc) try { capture.proc.kill('SIGTERM'); } catch {}
+    killCaptureProcesses();
     server.close();
     process.exit(0);
   };

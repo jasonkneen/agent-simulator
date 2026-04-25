@@ -479,6 +479,7 @@ export default function App() {
               <div className="relative flex min-h-0 flex-1 flex-col">
                 <SimulatorView
                   streamUrl={config?.streamUrl}
+                  streamKind={config?.streamKind}
                   inspectMode={inspectMode}
                   pinned={pinned}
                   onPinnedChange={setPinned}

@@ -3,6 +3,7 @@ node_modules/
 
 # build output
 sim-server/target/
+sidecars/**/.build/
 web-app/dist/
 web-app/node_modules/
 

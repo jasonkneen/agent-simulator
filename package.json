@@ -8,6 +8,7 @@
     "server.js",
     "mcp",
     "scripts",
+    "sidecars",
     "web",
     "web-app/dist",
     "LICENSE",

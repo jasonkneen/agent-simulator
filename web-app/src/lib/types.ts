@@ -33,18 +33,19 @@ export type InspectResult = {
  * Capture pipeline settings. The UI can change them at runtime via
  * `setCapture` WS messages; the server respawns sim-server with the new
  * values and broadcasts a `configChanged` event so every preview
- * reconnects its MJPEG <img>.
+ * reconnects to either MJPEG or native fMP4 streaming.
  */
 export type CaptureSettings = {
   fps: number;
   quality: number;
   scale: number;
-  mode: "mjpeg" | "bgra";
+  mode: "mjpeg" | "bgra" | "simstream";
 };
 
 export type SimConfig = {
-  streamUrl: string;
-  snapshotUrl: string;
+  streamUrl: string | null;
+  streamKind?: "mjpeg" | "simstream";
+  snapshotUrl: string | null;
   simulator: { udid: string; name: string };
   capture: CaptureSettings;
 };

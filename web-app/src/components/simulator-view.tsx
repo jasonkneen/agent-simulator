@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Pin, Keyboard } from "lucide-react";
 import type { LayerNode, Rect } from "@/lib/types";
+import {
+  codecFromAvcC,
+  makeFmp4Fragment,
+  makeFmp4InitSegment,
+  parseSimstreamMessage,
+} from "@/lib/simstream-protocol";
 import { cn } from "@/lib/utils";
 
 export type SimulatorViewProps = {
-  streamUrl: string | undefined;
+  streamUrl: string | null | undefined;
+  streamKind?: "mjpeg" | "simstream";
   inspectMode: boolean;
   /** When true we stop chasing hover inspects and keep the current selection locked. */
   pinned: boolean;
@@ -45,6 +52,7 @@ const WHEEL_PIXEL_DIVISOR = 800;
  */
 export function SimulatorView({
   streamUrl,
+  streamKind = "mjpeg",
   inspectMode,
   pinned,
   onPinnedChange,
@@ -59,8 +67,10 @@ export function SimulatorView({
   onKey,
 }: SimulatorViewProps) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
-  const imgRef = useRef<HTMLImageElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | HTMLVideoElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
 
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
   const lastHoverInspectRef = useRef<number>(0);
@@ -87,23 +97,26 @@ export function SimulatorView({
   /** Whether the user has clicked into the sim to capture keyboard input. */
   const [kbFocused, setKbFocused] = useState(false);
 
-  // Recompute rendered image size on resize so overlay matches.
+  const updateMediaSize = useCallback(() => {
+    const media = imgRef.current;
+    if (!media) return;
+    const r = media.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) setImgSize({ w: r.width, h: r.height });
+  }, []);
+
+  // Recompute rendered media size on resize so overlay matches.
   useEffect(() => {
-    const img = imgRef.current;
-    if (!img) return;
-    const update = () => {
-      const r = img.getBoundingClientRect();
-      setImgSize({ w: r.width, h: r.height });
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(img);
-    window.addEventListener("resize", update);
+    const media = imgRef.current;
+    if (!media) return;
+    updateMediaSize();
+    const ro = new ResizeObserver(updateMediaSize);
+    ro.observe(media);
+    window.addEventListener("resize", updateMediaSize);
     return () => {
       ro.disconnect();
-      window.removeEventListener("resize", update);
+      window.removeEventListener("resize", updateMediaSize);
     };
-  }, [streamUrl]);
+  }, [streamUrl, streamKind, updateMediaSize]);
 
   // Leaving inspect mode or unpinning? Reset the hover throttle so the next
   // entry fires immediately.
@@ -275,6 +288,137 @@ export function SimulatorView({
     [inspectMode, onInspect, onPinnedChange, pingAt, toRatio],
   );
 
+  useEffect(() => {
+    if (streamKind !== "simstream" || !streamUrl) {
+      setStreamError(null);
+      return;
+    }
+
+    const video = videoRef.current;
+    if (!video) return;
+    if (!("MediaSource" in window)) {
+      setStreamError("This browser does not support MediaSource playback.");
+      return;
+    }
+
+    let cancelled = false;
+    let sourceBuffer: SourceBuffer | null = null;
+    let lastPtsUs: bigint | null = null;
+    let sequenceNumber = 1;
+    let config: { width: number; height: number; avcC: Uint8Array } | null = null;
+    const queue: Uint8Array[] = [];
+    const mediaSource = new MediaSource();
+    const objectUrl = URL.createObjectURL(mediaSource);
+    const ws = new WebSocket(streamUrl);
+    ws.binaryType = "arraybuffer";
+    setStreamError(null);
+    setImgSize(null);
+    video.src = objectUrl;
+
+    const pump = () => {
+      if (!sourceBuffer || sourceBuffer.updating || queue.length === 0) return;
+      if (mediaSource.readyState !== "open") return;
+      const next = queue.shift();
+      if (!next) return;
+      try {
+        const buffer = new ArrayBuffer(next.byteLength);
+        new Uint8Array(buffer).set(next);
+        sourceBuffer.appendBuffer(buffer);
+      } catch (err) {
+        setStreamError(err instanceof Error ? err.message : String(err));
+      }
+    };
+
+    const append = (segment: Uint8Array) => {
+      // Keep a live stream from running away if the tab throttles SourceBuffer appends.
+      if (queue.length > 90) queue.splice(0, queue.length - 30);
+      queue.push(segment);
+      pump();
+    };
+
+    const ensureSourceBuffer = () => {
+      if (!config || sourceBuffer || mediaSource.readyState !== "open") return;
+      const codec = codecFromAvcC(config.avcC);
+      try {
+        sourceBuffer = mediaSource.addSourceBuffer(`video/mp4; codecs="${codec}"`);
+        sourceBuffer.mode = "segments";
+        sourceBuffer.addEventListener("updateend", pump);
+        append(makeFmp4InitSegment(config));
+      } catch (err) {
+        setStreamError(err instanceof Error ? err.message : String(err));
+      }
+    };
+
+    mediaSource.addEventListener("sourceopen", ensureSourceBuffer);
+    ws.onopen = () => setStreamError(null);
+    ws.onerror = () => setStreamError("simstream WebSocket error");
+    ws.onclose = () => {
+      if (!cancelled) setStreamError("simstream disconnected");
+    };
+    ws.onmessage = async (event) => {
+      try {
+        const data = event.data instanceof ArrayBuffer
+          ? event.data
+          : await (event.data as Blob).arrayBuffer();
+        if (cancelled) return;
+        const msg = parseSimstreamMessage(new Uint8Array(data));
+        if (msg.type === "config") {
+          config = msg;
+          ensureSourceBuffer();
+          requestAnimationFrame(updateMediaSize);
+          return;
+        }
+        if (!sourceBuffer) return;
+        const duration = lastPtsUs === null
+          ? 16_667
+          : Math.max(1, Math.min(250_000, Number(msg.ptsUs - lastPtsUs)));
+        lastPtsUs = msg.ptsUs;
+        append(makeFmp4Fragment({
+          sequenceNumber: sequenceNumber++,
+          baseMediaDecodeTime: msg.ptsUs,
+          duration,
+          sample: msg.sample,
+          isKeyframe: msg.isKeyframe,
+        }));
+        void video.play().catch(() => undefined);
+      } catch (err) {
+        if (!cancelled) setStreamError(err instanceof Error ? err.message : String(err));
+      }
+    };
+
+    return () => {
+      cancelled = true;
+      try { ws.close(); } catch { /* noop */ }
+      mediaSource.removeEventListener("sourceopen", ensureSourceBuffer);
+      if (sourceBuffer) sourceBuffer.removeEventListener("updateend", pump);
+      if (mediaSource.readyState === "open") {
+        try { mediaSource.endOfStream(); } catch { /* noop */ }
+      }
+      video.removeAttribute("src");
+      video.load();
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [streamKind, streamUrl, updateMediaSize]);
+
+  const mediaHandlers = {
+    onMouseDown: handleMouseDown,
+    onMouseMove: handleMouseMove,
+    onMouseUp: handleMouseUp,
+    onMouseLeave: () => {
+      setHover(null);
+      dragRef.current = null;
+      setDragLine(null);
+    },
+    onClick: handleClickInspect,
+    onWheel: handleWheel,
+    onContextMenu: (e: React.MouseEvent<HTMLElement>) => e.preventDefault(),
+  };
+
+  const mediaClassName = cn(
+    "block max-h-[calc(100vh-5rem)] select-none rounded-[2.25rem] shadow-2xl ring-1 ring-border/60",
+    inspectMode ? "cursor-crosshair" : "cursor-none",
+  );
+
   return (
     <div
       ref={wrapperRef}
@@ -289,40 +433,46 @@ export function SimulatorView({
     >
       <div className="relative max-h-full">
         {streamUrl ? (
-          <img
-            ref={imgRef}
-            src={streamUrl}
-            alt="Simulator"
-            draggable={false}
-            onLoad={() => {
-              const img = imgRef.current;
-              if (!img) return;
-              const r = img.getBoundingClientRect();
-              setImgSize({ w: r.width, h: r.height });
-            }}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onMouseLeave={() => {
-              setHover(null);
-              dragRef.current = null;
-              setDragLine(null);
-            }}
-            onClick={handleClickInspect}
-            onWheel={handleWheel}
-            onContextMenu={(e) => e.preventDefault()}
-            className={cn(
-              "block max-h-[calc(100vh-5rem)] select-none rounded-[2.25rem] shadow-2xl ring-1 ring-border/60",
-              inspectMode ? "cursor-crosshair" : "cursor-none",
-            )}
-          />
+          streamKind === "simstream" ? (
+            <video
+              ref={(el) => {
+                imgRef.current = el;
+                videoRef.current = el;
+              }}
+              aria-label="Simulator"
+              autoPlay
+              muted
+              playsInline
+              controls={false}
+              onLoadedMetadata={updateMediaSize}
+              onResize={updateMediaSize}
+              {...mediaHandlers}
+              className={mediaClassName}
+            />
+          ) : (
+            <img
+              ref={(el) => { imgRef.current = el; }}
+              src={streamUrl}
+              alt="Simulator"
+              draggable={false}
+              onLoad={updateMediaSize}
+              {...mediaHandlers}
+              className={mediaClassName}
+            />
+          )
         ) : (
           <div className="grid h-[80vh] w-[400px] place-items-center rounded-3xl border border-dashed border-border/60 bg-muted/30 text-sm text-muted-foreground">
             Waiting for simulator stream…
           </div>
         )}
 
-        {/* Overlays \u2014 only visible in inspect mode */}
+        {streamError && streamUrl && (
+          <div className="pointer-events-none absolute left-1/2 top-3 max-w-[320px] -translate-x-1/2 rounded-full border border-destructive/40 bg-destructive/10 px-3 py-1 text-center text-[10px] font-semibold uppercase tracking-wider text-destructive backdrop-blur">
+            {streamError}
+          </div>
+        )}
+
+        {/* Overlays — only visible in inspect mode */}
         {imgSize && inspectMode && streamUrl && (
           <div
             className="pointer-events-none absolute inset-0"

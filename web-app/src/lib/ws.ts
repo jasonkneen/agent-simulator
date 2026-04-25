@@ -20,7 +20,7 @@ export type ClientMsg =
       fps?: number;
       quality?: number;
       scale?: number;
-      mode?: "mjpeg" | "bgra";
+      mode?: "mjpeg" | "bgra" | "simstream";
     }
   | { type: "inspect"; x: number; y: number; requestStack?: boolean; reqId?: string };
 
