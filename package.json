@@ -50,10 +50,10 @@
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jkneen/agent-simulator"
+    "url": "https://github.com/jasonkneen/agent-simulator"
   },
-  "homepage": "https://github.com/jkneen/agent-simulator",
+  "homepage": "https://github.com/jasonkneen/agent-simulator",
   "bugs": {
-    "url": "https://github.com/jkneen/agent-simulator/issues"
+    "url": "https://github.com/jasonkneen/agent-simulator/issues"
   }
 }
