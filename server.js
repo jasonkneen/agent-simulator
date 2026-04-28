@@ -286,8 +286,30 @@ function getFreePort() {
   });
 }
 
+function newestMtimeMs(root) {
+  let newest = 0;
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (entry.name === '.build') continue;
+    const full = path.join(root, entry.name);
+    const stat = fs.statSync(full);
+    if (stat.isDirectory()) newest = Math.max(newest, newestMtimeMs(full));
+    else newest = Math.max(newest, stat.mtimeMs);
+  }
+  return newest;
+}
+
+function simstreamBinaryIsFresh() {
+  if (!fs.existsSync(SIMSTREAM_BIN)) return false;
+  const binaryMtime = fs.statSync(SIMSTREAM_BIN).mtimeMs;
+  const sourceMtime = Math.max(
+    fs.statSync(path.join(SIMSTREAM_PACKAGE_DIR, 'Package.swift')).mtimeMs,
+    newestMtimeMs(path.join(SIMSTREAM_PACKAGE_DIR, 'Sources')),
+  );
+  return binaryMtime >= sourceMtime;
+}
+
 function ensureSimstreamBinary() {
-  if (fs.existsSync(SIMSTREAM_BIN)) return Promise.resolve(SIMSTREAM_BIN);
+  if (simstreamBinaryIsFresh()) return Promise.resolve(SIMSTREAM_BIN);
   if (simstreamBuildPromise) return simstreamBuildPromise;
   console.log('🛠️  Building simstream sidecar…');
   simstreamBuildPromise = new Promise((resolve, reject) => {

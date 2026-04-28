@@ -14,6 +14,7 @@ static id gDisplayPort;
 static id gIOClient;
 static NSUUID *gCallbackUUID;
 static void (^gSurfaceCallback)(id);
+static void (^gDamageCallback)(NSArray *);
 static IOSurfaceRef gSurface;
 
 static SEL sel(const char *name) { return sel_registerName(name); }
@@ -204,18 +205,42 @@ static bool find_display_endpoint(id device, id *outIO, id *outPort, id *outDesc
   id bestPort = nil;
   id bestDescriptor = nil;
   size_t bestPixels = 0;
+  BOOL bestIsMainClass = NO;
 
   NSArray *ports = ports_for_io(ioClient);
   for (id port in ports) {
     id descriptor = display_descriptor_from_candidate(port, displayProtocol);
     if (!descriptor) continue;
+
+    // Prefer descriptors whose state.displayClass == 0 (the documented "main display"
+    // marker that FBSimulatorControl uses). Fall back to the largest surface only
+    // when no main-class descriptor is found.
+    BOOL isMainClass = NO;
+    @try {
+      if ([descriptor respondsToSelector:NSSelectorFromString(@"state")]) {
+        id descState = call_id(descriptor, NSSelectorFromString(@"state"));
+        if (descState && [descState respondsToSelector:NSSelectorFromString(@"displayClass")]) {
+          unsigned short displayClass =
+              ((unsigned short (*)(id, SEL))objc_msgSend)(descState, NSSelectorFromString(@"displayClass"));
+          isMainClass = (displayClass == 0);
+        }
+      }
+    } @catch (__unused NSException *e) {}
+
     IOSurfaceRef surface = copy_framebuffer_surface(descriptor);
     size_t pixels = surface ? IOSurfaceGetWidth(surface) * IOSurfaceGetHeight(surface) : 0;
     if (surface) CFRelease(surface);
-    if (!bestDescriptor || pixels > bestPixels) {
+
+    BOOL beats = NO;
+    if (!bestDescriptor) beats = YES;
+    else if (isMainClass && !bestIsMainClass) beats = YES;
+    else if (isMainClass == bestIsMainClass && pixels > bestPixels) beats = YES;
+
+    if (beats) {
       bestPort = port;
       bestDescriptor = descriptor;
       bestPixels = pixels;
+      bestIsMainClass = isMainClass;
     }
   }
 
@@ -316,6 +341,25 @@ bool SPBridgeStart(const char *udid, char **errorOut) {
         fprintf(stderr, "[simstream] callback registration %s threw: %s\n", registrationSelectors[i], e.description.UTF8String);
       }
     }
+
+    // The IOSurface object reference rarely changes — Apple recycles a single buffer
+    // and mutates pixels in place. damageRectanglesCallback is what fires on every
+    // committed frame (~60Hz). Without it, surface-change callbacks alone may not
+    // fire for an idle screen, leaving the stream looking stuck.
+    SEL damageSelector = NSSelectorFromString(@"registerCallbackWithUUID:damageRectanglesCallback:");
+    if ([gDisplayDescriptor respondsToSelector:damageSelector]) {
+      gDamageCallback = ^(__unused NSArray *rects) {
+        refresh_surface_from_display();
+      };
+      @try {
+        ((void (*)(id, SEL, id, id))objc_msgSend)(gDisplayDescriptor, damageSelector, gCallbackUUID, gDamageCallback);
+        fprintf(stderr, "[simstream] subscribed via damageRectanglesCallback (uuid=%s)\n", gCallbackUUID.UUIDString.UTF8String);
+        subscribed = YES;
+      } @catch (NSException *e) {
+        fprintf(stderr, "[simstream] damage callback registration threw: %s\n", e.description.UTF8String);
+      }
+    }
+
     if (!subscribed) {
       fprintf(stderr, "[simstream] display descriptor has no known IOSurface callback registration selector; polling framebufferSurface only\n");
     }
@@ -340,6 +384,7 @@ void SPBridgeStop(void) {
       const char *unregisterSelectors[] = {
         "unregisterIOSurfacesChangeCallbackWithUUID:",
         "unregisterIOSurfaceChangeCallbackWithUUID:",
+        "unregisterDamageRectanglesCallbackWithUUID:",
         "unregisterCallbackWithUUID:",
       };
       for (size_t i = 0; i < sizeof(unregisterSelectors) / sizeof(unregisterSelectors[0]); i++) {
@@ -350,6 +395,7 @@ void SPBridgeStop(void) {
       }
     }
     gSurfaceCallback = nil;
+    gDamageCallback = nil;
     gCallbackUUID = nil;
     gDisplayDescriptor = nil;
     gDisplayPort = nil;
