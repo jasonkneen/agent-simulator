@@ -142,7 +142,9 @@ module.exports = withAgentSimulator(getDefaultConfig(__dirname));
 …then install this package alongside:
 
 ```bash
-bun add -D agent-simulator
+# Note: `agent-simulator` is not published to npm yet.
+# Install directly from GitHub:
+bun add -D github:jasonkneen/agent-simulator
 ```
 
 Or, if you don't want to touch Metro config, import the bridge at your app's entry point *before* `registerRootComponent`:
